@@ -146,6 +146,39 @@ const TimePicker12h = form.Value.extend({
 	}
 });
 
+// StatusFlag: Checkbox with live updating subtle green/red active/inactive pill
+const StatusFlag = form.Flag.extend({
+	renderWidget: function(section_id, option_index, cfgvalue) {
+		const node = this.super('renderWidget', [section_id, option_index, cfgvalue]);
+		const isChecked = (cfgvalue !== '0' && cfgvalue !== false);
+
+		const pill = E('span', {
+			'style': isChecked
+				? 'background:rgba(40,167,69,0.15);color:#28a745;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-left:6px;display:inline-block;'
+				: 'background:rgba(220,53,69,0.15);color:#e05260;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-left:6px;display:inline-block;'
+		}, isChecked ? _('Active') : _('Inactive'));
+
+		const input = node.querySelector('input[type="checkbox"]');
+		if (input) {
+			input.addEventListener('change', function() {
+				if (this.checked) {
+					pill.style.background = 'rgba(40,167,69,0.15)';
+					pill.style.color = '#28a745';
+					pill.textContent = _('Active');
+				} else {
+					pill.style.background = 'rgba(220,53,69,0.15)';
+					pill.style.color = '#e05260';
+					pill.textContent = _('Inactive');
+				}
+			});
+		}
+
+		return E('div', {
+			'style': 'display:inline-flex;align-items:center;'
+		}, [node, pill]);
+	}
+});
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -328,17 +361,21 @@ return view.extend({
 			return '<span style="font-weight:600;display:inline-block;padding:2px 0;">' + cutoffStr + '</span>';
 		};
 
-		// Enabled Switch per schedule
-		o = s.option(form.Flag, 'enabled', _('Active'));
+		// Active Switch with subtle status styling
+		o = s.option(StatusFlag, 'enabled', _('Active'));
 		o.default = '1';
 		o.rmempty = false;
 
 		// 4. Target Devices Section (Table with Device Auto-Discovery)
 		s = m.section(form.TableSection, 'device', _('Target Devices to Restrict'),
-			_('Select the devices subject to these schedules (Rokus, Samsung TVs, tablets, gaming consoles). All unlisted household devices remain unrestricted.'));
+			_('Select the devices subject to these schedules (Rokus, Samsung TVs, tablets, gaming consoles). Uncheck "Active" to temporarily exempt a device from curfews without deleting it.'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
+
+		o = s.option(StatusFlag, 'enabled', _('Active'));
+		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'name', _('Device Friendly Name'));
 		o.placeholder = 'e.g. Roku Streambar Living Room';

@@ -67,6 +67,8 @@ get_devices() {
 	init_config
 	uci show internet_schedule 2>/dev/null | grep -E "=device$" | while read -r line; do
 		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+		dev_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
+		[ "$dev_enabled" = "0" ] && continue
 		name=$(uci -q get internet_schedule."$sec".name || echo "Unnamed Device")
 		mac=$(uci -q get internet_schedule."$sec".mac | tr 'A-F' 'a-f')
 		if [ -n "$mac" ] && echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
@@ -295,6 +297,19 @@ cmd_status() {
 			status="ENFORCED"
 		fi
 		printf "%-24s %-19s %-16s %-10s\n" "$name" "$mac" "$ip" "$status"
+	done
+
+	# Also show any disabled devices
+	uci show internet_schedule 2>/dev/null | grep -E "=device$" | while read -r line; do
+		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+		dev_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
+		if [ "$dev_enabled" = "0" ]; then
+			name=$(uci -q get internet_schedule."$sec".name || echo "Unnamed Device")
+			mac=$(uci -q get internet_schedule."$sec".mac | tr 'A-F' 'a-f')
+			ip=$(get_ip_for_mac "$mac")
+			[ -z "$ip" ] && ip="(offline)"
+			printf "%-24s %-19s %-16s %-10s\n" "$name" "$mac" "$ip" "EXEMPT"
+		fi
 	done
 	echo "=========================================================="
 }
