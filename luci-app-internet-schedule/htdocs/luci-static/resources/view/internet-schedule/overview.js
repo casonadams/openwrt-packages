@@ -418,8 +418,8 @@ return view.extend({
 			]);
 		};
 
-		// 2. Schedules Section
-		s = m.section(form.TableSection, 'schedule', _('Schedules'));
+		// 2. Allowed Times Section
+		s = m.section(form.TableSection, 'schedule', _('Allowed Times'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
@@ -457,8 +457,8 @@ return view.extend({
 			return '<span style="font-weight:600;display:inline-block;padding:2px 0;">' + cutoffStr + '</span>';
 		};
 
-		// 3. Devices Section
-		s = m.section(form.TableSection, 'device', _('Devices'));
+		// 3. Managed Devices Section
+		s = m.section(form.TableSection, 'device', _('Managed Devices'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
