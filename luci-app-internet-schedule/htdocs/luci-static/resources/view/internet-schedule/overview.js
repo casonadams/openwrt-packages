@@ -18,6 +18,105 @@ const callSystemInfo = rpc.declare({
 	expect: { '': {} }
 });
 
+function parse24to12(timeStr) {
+	if (!timeStr) return { h: 6, m: 0, ampm: 'PM' };
+	const parts = String(timeStr).split(':');
+	let h = parseInt(parts[0], 10);
+	if (isNaN(h)) h = 18;
+	let m = parseInt(parts[1], 10);
+	if (isNaN(m)) m = 0;
+	const ampm = (h >= 12) ? 'PM' : 'AM';
+	let h12 = h % 12;
+	if (h12 === 0) h12 = 12;
+	return { h: h12, m: m, ampm: ampm };
+}
+
+function parse12to24(h12, m, ampm) {
+	let h = parseInt(h12, 10);
+	if (isNaN(h)) h = 12;
+	const min = parseInt(m, 10);
+	const mins = isNaN(min) ? 0 : min;
+	if (ampm === 'PM' && h < 12) {
+		h += 12;
+	} else if (ampm === 'AM' && h === 12) {
+		h = 0;
+	}
+	const hStr = (h < 10 ? '0' : '') + h;
+	const mStr = (mins < 10 ? '0' : '') + mins;
+	return hStr + ':' + mStr + ':00';
+}
+
+// Custom 12-Hour Interactive Time Picker CBI Widget
+const TimePicker12h = form.Value.extend({
+	renderWidget: function(section_id, option_index, cfgvalue) {
+		const parsed = parse24to12(cfgvalue);
+		const self = this;
+
+		const hourSelect = E('select', {
+			'class': 'cbi-input-select',
+			'style': 'width:auto;display:inline-block;margin-right:6px;font-weight:600;'
+		});
+		for (let h = 1; h <= 12; h++) {
+			hourSelect.appendChild(E('option', {
+				'value': h,
+				'selected': (h === parsed.h) ? '' : null
+			}, String(h)));
+		}
+
+		const minSelect = E('select', {
+			'class': 'cbi-input-select',
+			'style': 'width:auto;display:inline-block;margin-right:6px;font-family:monospace;'
+		});
+		for (let m = 0; m < 60; m += 5) {
+			const mStr = (m < 10 ? '0' : '') + m;
+			minSelect.appendChild(E('option', {
+				'value': m,
+				'selected': (m === parsed.m) ? '' : null
+			}, ':' + mStr));
+		}
+
+		const ampmSelect = E('select', {
+			'class': 'cbi-input-select',
+			'style': 'width:auto;display:inline-block;font-weight:700;'
+		});
+		ampmSelect.appendChild(E('option', {
+			'value': 'AM',
+			'selected': (parsed.ampm === 'AM') ? '' : null
+		}, 'AM'));
+		ampmSelect.appendChild(E('option', {
+			'value': 'PM',
+			'selected': (parsed.ampm === 'PM') ? '' : null
+		}, 'PM'));
+
+		const hiddenInput = E('input', {
+			'type': 'hidden',
+			'id': this.cbid(section_id),
+			'name': this.cbid(section_id),
+			'value': parse12to24(parsed.h, parsed.m, parsed.ampm)
+		});
+
+		const updateVal = function() {
+			const val24 = parse12to24(hourSelect.value, minSelect.value, ampmSelect.value);
+			hiddenInput.value = val24;
+			dom.dispatch(hiddenInput, 'widget-change');
+		};
+
+		hourSelect.addEventListener('change', updateVal);
+		minSelect.addEventListener('change', updateVal);
+		ampmSelect.addEventListener('change', updateVal);
+
+		return E('div', {
+			'class': 'time-picker-12h',
+			'style': 'display:inline-flex;align-items:center;padding:4px 0;'
+		}, [
+			hourSelect,
+			minSelect,
+			ampmSelect,
+			hiddenInput
+		]);
+	}
+});
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -38,57 +137,97 @@ return view.extend({
 
 		const tzMatch = (routerTzName === browserTz || (routerTzName.indexOf(browserTz) !== -1));
 
-		const routerDate = new Date((sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000);
-		const routerDateStr = routerDate.toLocaleString('en-US', { timeZone: 'UTC', hour12: false });
-		const browserDateStr = new Date().toLocaleString('en-US', { hour12: false });
+		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
+		const routerDate = new Date(routerTimestamp);
+		const routerDateStr = routerDate.toLocaleString('en-US', {
+			timeZone: 'UTC',
+			hour12: true,
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit',
+			second: '2-digit'
+		});
+		const browserDateStr = new Date().toLocaleString('en-US', {
+			hour12: true,
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit',
+			second: '2-digit'
+		});
 
 		let m, s, o;
 
 		m = new form.Map('internet_schedule', _('Internet Access Schedule'),
 			_('Automated daily internet curfew and access control for kids, smart TVs, and streaming devices.'));
 
-		// Custom Header: Live Clock & Timezone Comparison Box
-		s = m.section(form.NamedSection, 'settings', 'settings', _('Status & Timezone Alignment'));
+		// Custom Hero Header styled with OpenWrt theme classes (ifacebox/cbi-section)
+		s = m.section(form.NamedSection, 'settings', 'settings', _('System & Timezone Alignment'));
 		s.render = function() {
-			const tzBannerClass = tzMatch ? 'alert-message success' : 'alert-message warning';
+			const tzBannerClass = tzMatch ? 'alert-message notice success' : 'alert-message warning';
 			const tzIcon = tzMatch ? '✓' : '⚠';
 			const tzText = tzMatch
-				? _('Router and browser timezones are aligned (%s). Scheduled times will trigger at your local time.').format(routerTzName)
-				: _('Timezone difference detected! The router is configured for <b>%s</b>, while your browser is in <b>%s</b>. Scheduled hours are evaluated against the Router clock.').format(routerTzName, browserTz);
+				? _('Router and browser timezones are aligned (%s). Scheduled times match your local wall-clock time.').format(routerTzName)
+				: _('Timezone discrepancy detected! The router is operating on <b>%s</b>, but your browser is in <b>%s</b>. Scheduled hours are evaluated against the Router clock.').format(routerTzName, browserTz);
 
 			const currentMode = uci.get('internet_schedule', 'settings', 'mode') || 'schedule';
 			const isEnabled = uci.get('internet_schedule', 'settings', 'enabled') !== '0';
 
-			let modeBadge = '';
+			let modeBadge;
 			if (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled') {
-				modeBadge = '<span class="badge" style="background:#28a745;color:#fff;padding:4px 8px;border-radius:4px;font-weight:bold;">UNLOCKED (Unrestricted Internet)</span>';
+				modeBadge = E('span', {
+					'class': 'badge',
+					'style': 'background-color:#28a745;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
+				}, _('UNLOCKED (Full Access)'));
 			} else if (currentMode === 'block') {
-				modeBadge = '<span class="badge" style="background:#dc3545;color:#fff;padding:4px 8px;border-radius:4px;font-weight:bold;">LOCKED DOWN (Emergency Block)</span>';
+				modeBadge = E('span', {
+					'class': 'badge',
+					'style': 'background-color:#dc3545;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
+				}, _('LOCKED DOWN (Emergency Block)'));
 			} else {
-				modeBadge = '<span class="badge" style="background:#007bff;color:#fff;padding:4px 8px;border-radius:4px;font-weight:bold;">SCHEDULE ACTIVE (Enforcing Hours)</span>';
+				modeBadge = E('span', {
+					'class': 'badge',
+					'style': 'background-color:#007bff;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
+				}, _('SCHEDULE ACTIVE (Enforcing Hours)'));
 			}
 
 			return E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'class': tzBannerClass, 'style': 'margin-bottom:15px;' }, [
 					E('p', {}, [
-						E('strong', {}, tzIcon + ' Timezone Status: '),
+						E('strong', {}, tzIcon + ' ' + _('Timezone Verification') + ': '),
 						E('span', {}, tzText)
 					])
 				]),
-				E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:15px;margin-bottom:20px;' }, [
-					E('div', { 'style': 'flex:1;min-width:240px;background:#f8f9fa;padding:12px;border:1px solid #ddd;border-radius:4px;' }, [
-						E('div', { 'style': 'font-size:11px;text-transform:uppercase;color:#666;font-weight:bold;' }, _('Router Clock')),
-						E('div', { 'style': 'font-size:15px;font-weight:bold;margin-top:4px;' }, routerDateStr),
-						E('div', { 'style': 'font-size:12px;color:#555;' }, routerTzName + ' (' + routerTz + ')')
+				E('div', {
+					'class': 'cbi-section-node',
+					'style': 'display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:15px;margin-bottom:15px;'
+				}, [
+					// Card 1: Router Clock
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Router System Clock')),
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
+							E('div', { 'style': 'font-size:16px;font-weight:bold;margin-bottom:4px;' }, routerDateStr),
+							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, routerTzName + ' (' + routerTz + ')')
+						])
 					]),
-					E('div', { 'style': 'flex:1;min-width:240px;background:#f8f9fa;padding:12px;border:1px solid #ddd;border-radius:4px;' }, [
-						E('div', { 'style': 'font-size:11px;text-transform:uppercase;color:#666;font-weight:bold;' }, _('Your Browser Clock')),
-						E('div', { 'style': 'font-size:15px;font-weight:bold;margin-top:4px;' }, browserDateStr),
-						E('div', { 'style': 'font-size:12px;color:#555;' }, browserTz)
+					// Card 2: Browser Clock
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Your Browser Clock')),
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
+							E('div', { 'style': 'font-size:16px;font-weight:bold;margin-bottom:4px;' }, browserDateStr),
+							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, browserTz)
+						])
 					]),
-					E('div', { 'style': 'flex:1;min-width:240px;background:#f8f9fa;padding:12px;border:1px solid #ddd;border-radius:4px;' }, [
-						E('div', { 'style': 'font-size:11px;text-transform:uppercase;color:#666;font-weight:bold;' }, _('Current Enforcement')),
-						E('div', { 'style': 'margin-top:6px;' }, modeBadge)
+					// Card 3: Current Policy State
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Enforcement Status')),
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
+							E('div', { 'style': 'margin-top:4px;' }, modeBadge),
+							E('div', { 'style': 'opacity:0.8;font-size:12px;margin-top:6px;' }, _('Managed by firewall4 kernel rules'))
+						])
 					])
 				])
 			]);
@@ -111,16 +250,13 @@ return view.extend({
 		o.value('block', _('Emergency Lockdown (Block All Right Now)'));
 		o.default = 'schedule';
 
-		o = s.option(form.Value, 'start_time', _('Daily Allowed Start Time'),
-			_('Time of day when internet access is opened (e.g. 18:00 or 18:00:00).'));
-		o.placeholder = '18:00:00';
-		o.datatype = 'time';
+		// 12-Hour Dropdown Time Pickers
+		o = s.option(TimePicker12h, 'start_time', _('Daily Allowed Start Time'),
+			_('Time of day when internet access opens for target devices.'));
 		o.default = '18:00:00';
 
-		o = s.option(form.Value, 'stop_time', _('Daily Allowed Cutoff Time'),
-			_('Time of day when internet access is closed and active video streams are terminated (e.g. 19:30 or 19:30:00).'));
-		o.placeholder = '19:30:00';
-		o.datatype = 'time';
+		o = s.option(TimePicker12h, 'stop_time', _('Daily Allowed Cutoff Time'),
+			_('Time of day when internet access cuts off and active video streams are terminated.'));
 		o.default = '19:30:00';
 
 		o = s.option(form.MultiValue, 'weekdays', _('Active Days of Week'),
