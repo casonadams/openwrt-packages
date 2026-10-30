@@ -1,7 +1,7 @@
 #!/bin/sh
 # /usr/bin/internet-schedule
 # Backend engine for luci-app-internet-schedule
-# Manages multi-schedules, "Ignore until tomorrow", firewall4 (nftables), and conntrack
+# Implements Apple Screen Time "Ignore Downtime Until Schedule" and "Turn On Downtime Until Schedule"
 
 CRON_FILE="/etc/crontabs/root"
 OVERRIDE_FILE="/etc/internet-schedule.override"
@@ -98,17 +98,80 @@ clean_firewall_rules() {
 	done
 }
 
-is_override_active() {
+get_override_state() {
 	if [ -f "$OVERRIDE_FILE" ]; then
-		expiry_day=$(cat "$OVERRIDE_FILE" 2>/dev/null | tr -d ' \r\n')
-		today=$(date +%Y-%m-%d)
-		if [ "$expiry_day" = "$today" ]; then
-			return 0
-		else
-			rm -f "$OVERRIDE_FILE"
-		fi
+		val=$(cat "$OVERRIDE_FILE" 2>/dev/null | tr -d ' \r\n')
+		case "$val" in
+			ignore_downtime|forced_downtime) echo "$val" ;;
+			*) echo "none" ;;
+		esac
+	else
+		echo "none"
 	fi
-	return 1
+}
+
+# Determine if current moment is inside an allowed schedule window
+is_currently_in_window() {
+	now_h=$(date +%H | sed 's/^0//'); [ -z "$now_h" ] && now_h=0
+	now_m=$(date +%M | sed 's/^0//'); [ -z "$now_m" ] && now_m=0
+	now_s=$(date +%S | sed 's/^0//'); [ -z "$now_s" ] && now_s=0
+	now_sec=$((now_h * 3600 + now_m * 60 + now_s))
+	cur_day=$(date +%a)
+
+	in_window=1 # 1 = false in ash return codes
+	uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | while read -r line; do
+		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+		sec_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
+		[ "$sec_enabled" = "0" ] && continue
+
+		# Check weekday
+		days=$(uci -q get internet_schedule."$sec".weekdays)
+		match_day=0
+		if [ -z "$days" ] || [ "$days" = "all" ]; then
+			match_day=1
+		else
+			for d in $days; do
+				if [ "$d" = "all" ] || [ "$d" = "$cur_day" ]; then
+					match_day=1
+					break
+				fi
+			done
+		fi
+		[ "$match_day" = "0" ] && continue
+
+		start_t=$(uci -q get internet_schedule."$sec".start_time || echo "18:00:00")
+		start_t=$(parse_time "$start_t")
+		dur=$(uci -q get internet_schedule."$sec".duration || echo "90")
+		stop_t=$(calc_stop_time "$start_t" "$dur")
+
+		s_h=$(echo "$start_t" | cut -d: -f1 | sed 's/^0//'); [ -z "$s_h" ] && s_h=0
+		s_m=$(echo "$start_t" | cut -d: -f2 | sed 's/^0//'); [ -z "$s_m" ] && s_m=0
+		s_sec=$((s_h * 3600 + s_m * 60))
+
+		e_h=$(echo "$stop_t" | cut -d: -f1 | sed 's/^0//'); [ -z "$e_h" ] && e_h=0
+		e_m=$(echo "$stop_t" | cut -d: -f2 | sed 's/^0//'); [ -z "$e_m" ] && e_m=0
+		e_sec=$((e_h * 3600 + e_m * 60))
+
+		if [ "$now_sec" -ge "$s_sec" ] && [ "$now_sec" -lt "$e_sec" ]; then
+			exit 0
+		fi
+	done
+	return $?
+}
+
+# Determine the effective current status string
+# Returns: "downtime" or "allowed"
+get_current_effective_status() {
+	override=$(get_override_state)
+	if [ "$override" = "ignore_downtime" ]; then
+		echo "allowed"
+	elif [ "$override" = "forced_downtime" ]; then
+		echo "downtime"
+	elif is_currently_in_window; then
+		echo "allowed"
+	else
+		echo "downtime"
+	fi
 }
 
 sync_firewall() {
@@ -125,15 +188,36 @@ sync_firewall() {
 		return
 	fi
 
-	# If "Ignore Schedule for Today" is active, skip creating block rules
-	if is_override_active; then
+	override=$(get_override_state)
+
+	# 1. If "Ignore Downtime Until Schedule" is active:
+	# Devices have full internet access (no blocking rules)
+	if [ "$override" = "ignore_downtime" ]; then
 		uci commit firewall
 		fw4 reload >/dev/null 2>&1
 		update_cron
 		return
 	fi
 
-	# Normal schedule enforcement
+	# 2. If "Turn On Downtime Until Schedule" is active:
+	# Force immediate lockdown (block rule active now)
+	if [ "$override" = "forced_downtime" ]; then
+		uci set firewall.kids_schedule_block=rule
+		uci set firewall.kids_schedule_block.name='Kids_Internet_Block'
+		uci set firewall.kids_schedule_block.src='lan'
+		uci set firewall.kids_schedule_block.dest='wan'
+		uci set firewall.kids_schedule_block.target='REJECT'
+		get_devices | while IFS='|' read -r dname mac; do
+			uci add_list firewall.kids_schedule_block.src_mac="$mac"
+		done
+		uci commit firewall
+		fw4 reload >/dev/null 2>&1
+		flush_flows
+		update_cron
+		return
+	fi
+
+	# 3. Normal schedule: ALLOW windows, then default REJECT
 	rule_idx=1
 	uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | while read -r line; do
 		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
@@ -213,14 +297,14 @@ update_cron() {
 	sed -i '/internet-schedule/d' "$CRON_FILE"
 
 	if [ "$CFG_ENABLED" = "1" ]; then
-		# Midnight reset for "Ignore for Today"
-		echo "0 0 * * * /usr/bin/internet-schedule check-override >/dev/null 2>&1" >> "$CRON_FILE"
-
-		# Schedule cutoff flushes
 		uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | while read -r line; do
 			sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
 			sec_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
 			[ "$sec_enabled" = "0" ] && continue
+
+			start_t=$(uci -q get internet_schedule."$sec".start_time || echo "18:00:00")
+			start_h=$(echo "$start_t" | cut -d: -f1 | sed 's/^0*//'); [ -z "$start_h" ] && start_h=0
+			start_m=$(echo "$start_t" | cut -d: -f2 | sed 's/^0*//'); [ -z "$start_m" ] && start_m=0
 
 			stop_t=$(uci -q get internet_schedule."$sec".stop_time || echo "19:30:00")
 			stop_h=$(echo "$stop_t" | cut -d: -f1 | sed 's/^0*//'); [ -z "$stop_h" ] && stop_h=0
@@ -237,65 +321,84 @@ update_cron() {
 				cron_days=$(echo "$c_list" | sed 's/,$//')
 			fi
 
-			echo "$stop_m $stop_h * * $cron_days /usr/bin/internet-schedule flush-flows >/dev/null 2>&1" >> "$CRON_FILE"
+			# At start time: transition point, resets any active override
+			echo "$start_m $start_h * * $cron_days /usr/bin/internet-schedule on-schedule-boundary >/dev/null 2>&1" >> "$CRON_FILE"
+
+			# At stop time: transition point, resets any active override & flushes active flows
+			echo "$stop_m $stop_h * * $cron_days /usr/bin/internet-schedule on-schedule-boundary >/dev/null 2>&1" >> "$CRON_FILE"
 		done
 	fi
 
 	/etc/init.d/cron restart >/dev/null 2>&1
 }
 
-cmd_ignore_today() {
-	date +%Y-%m-%d > "$OVERRIDE_FILE"
+# Called automatically when any schedule start or stop time arrives
+cmd_on_boundary() {
+	if [ -f "$OVERRIDE_FILE" ]; then
+		rm -f "$OVERRIDE_FILE"
+	fi
 	sync_firewall
-	echo "Schedule ignored for today. Rules will automatically resume at midnight."
+	if ! is_currently_in_window; then
+		flush_flows
+	fi
+}
+
+cmd_ignore_downtime() {
+	echo "ignore_downtime" > "$OVERRIDE_FILE"
+	sync_firewall
+	echo "Ignore Downtime Until Schedule engaged."
 	cmd_status
 }
 
-cmd_resume_schedule() {
-	rm -f "$OVERRIDE_FILE"
+cmd_turn_on_downtime() {
+	echo "forced_downtime" > "$OVERRIDE_FILE"
 	sync_firewall
 	flush_flows
-	echo "Resumed schedule. Curfews re-enforced."
+	echo "Turn On Downtime Until Schedule engaged."
 	cmd_status
 }
 
-cmd_check_override() {
-	if [ -f "$OVERRIDE_FILE" ]; then
-		expiry_day=$(cat "$OVERRIDE_FILE" 2>/dev/null | tr -d ' \r\n')
-		today=$(date +%Y-%m-%d)
-		if [ "$expiry_day" != "$today" ]; then
-			rm -f "$OVERRIDE_FILE"
-			sync_firewall
-			flush_flows
-		fi
+cmd_clear_override() {
+	rm -f "$OVERRIDE_FILE"
+	sync_firewall
+	if ! is_currently_in_window; then
+		flush_flows
 	fi
+	echo "Override cleared. Reverted to normal schedule."
+	cmd_status
 }
 
-cmd_get_override() {
-	if is_override_active; then
-		echo "active"
-	else
-		echo "inactive"
-	fi
+cmd_get_state() {
+	override=$(get_override_state)
+	status=$(get_current_effective_status)
+	echo "$status|$override"
 }
 
 cmd_status() {
 	init_config
 	zonename=$(uci -q get system.@system[0].zonename || echo "UTC")
 	CFG_ENABLED=$(uci -q get internet_schedule.settings.enabled || echo "1")
+	override=$(get_override_state)
+	eff_status=$(get_current_effective_status)
 
 	echo "=========================================================="
 	echo "              OpenWrt Internet Access Status              "
 	echo "=========================================================="
 	echo "Router Clock   : $(date '+%Y-%m-%d %I:%M:%S %p') ($zonename)"
 
-	echo -n "Operating Mode : "
-	if [ "$CFG_ENABLED" != "1" ]; then
-		echo "DISABLED / OFF"
-	elif is_override_active; then
-		echo "IGNORED FOR TODAY (Resumes at midnight)"
+	echo -n "Current State  : "
+	if [ "$eff_status" = "downtime" ]; then
+		if [ "$override" = "forced_downtime" ]; then
+			echo "DOWNTIME (Turned On Until Next Schedule)"
+		else
+			echo "DOWNTIME (Outside Scheduled Hours)"
+		fi
 	else
-		echo "SCHEDULE ACTIVE"
+		if [ "$override" = "ignore_downtime" ]; then
+			echo "INTERNET ALLOWED (Downtime Ignored Until Next Schedule)"
+		else
+			echo "INTERNET ALLOWED (Inside Scheduled Hours)"
+		fi
 	fi
 	echo "----------------------------------------------------------"
 	echo "Configured Schedules:"
@@ -320,10 +423,8 @@ cmd_status() {
 		[ -z "$ip" ] && ip="(offline)"
 
 		status="BLOCKED"
-		if [ "$CFG_ENABLED" != "1" ] || is_override_active; then
+		if [ "$eff_status" = "allowed" ]; then
 			status="ALLOWED"
-		else
-			status="ENFORCED"
 		fi
 		printf "%-24s %-19s %-16s %-10s\n" "$name" "$mac" "$ip" "$status"
 	done
@@ -377,23 +478,25 @@ cmd_remove_device() {
 }
 
 case "$1" in
-	status)               cmd_status ;;
-	ignore-today)         cmd_ignore_today ;;
-	resume-schedule)      cmd_resume_schedule ;;
-	check-override)       cmd_check_override ;;
-	get-override)         cmd_get_override ;;
-	add-device)           shift; cmd_add_device "$@" ;;
-	remove-device)        shift; cmd_remove_device "$@" ;;
-	sync)                 sync_firewall ;;
-	flush-flows)          flush_flows ;;
+	status)                   cmd_status ;;
+	ignore-downtime)          cmd_ignore_downtime ;;
+	turn-on-downtime)         cmd_turn_on_downtime ;;
+	clear-override)           cmd_clear_override ;;
+	on-schedule-boundary)     cmd_on_boundary ;;
+	get-state)                cmd_get_state ;;
+	add-device)               shift; cmd_add_device "$@" ;;
+	remove-device)            shift; cmd_remove_device "$@" ;;
+	sync)                     sync_firewall ;;
+	flush-flows)              flush_flows ;;
 	*)
 		echo "Usage: internet-schedule <command> [arguments]"
 		echo ""
 		echo "Commands:"
 		echo "  status                  Show current status, clock, and override state"
-		echo "  ignore-today            Ignore schedules for today (auto-resumes tomorrow)"
-		echo "  resume-schedule         Re-enforce schedules immediately"
-		echo "  get-override            Get machine-readable override status"
+		echo "  ignore-downtime         Ignore downtime until the next scheduled boundary"
+		echo "  turn-on-downtime        Turn on downtime immediately until the next schedule"
+		echo "  clear-override          Clear active override and resume normal schedule"
+		echo "  get-state               Machine-readable current state (status|override)"
 		echo "  add-device <name> <mac> Add a target device"
 		echo "  remove-device <name>    Remove a target device"
 		echo "  sync                    Sync firewall rules with configuration"
