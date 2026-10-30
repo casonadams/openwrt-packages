@@ -359,25 +359,29 @@ return view.extend({
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Action Button
+			// Action Button:
+			// Red when "Bypass Until Next Window" (invoking a bypass)
+			// Blue when "Resume Schedule" (returning to normal schedule enforcement)
 			const actionBtn = E('button', {
 				'type': 'button',
-				'class': 'cbi-button',
-				'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
+				'class': 'cbi-button'
 			});
 
 			if (overrideMode !== 'none') {
 				actionBtn.textContent = _('Resume Schedule');
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('clear-override', actionBtn);
 				});
 			} else if (currentStatus === 'downtime') {
 				actionBtn.textContent = _('Bypass Until Next Window');
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('ignore-downtime', actionBtn);
 				});
 			} else {
 				actionBtn.textContent = _('Block Until Next Window');
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('turn-on-downtime', actionBtn);
 				});
