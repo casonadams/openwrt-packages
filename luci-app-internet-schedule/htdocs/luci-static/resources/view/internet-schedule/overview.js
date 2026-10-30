@@ -335,30 +335,22 @@ return view.extend({
 			};
 
 			// Status badge
-			// Green = Normal Schedule is actively being enforced (whether currently in open or blocked window)
-			// Red / Amber = Schedule is overridden / bypassed (rules paused or blocked manually)
+			// Green = Normal Schedule is actively being enforced
+			// Red = Schedule is bypassed
 			let statusBadge;
-			if (overrideMode === 'ignore_downtime') {
+			if (overrideMode === 'ignore_downtime' || overrideMode === 'forced_downtime') {
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
-					_('Schedule Bypassed (Paused Until Next Window)')
-				]);
-			} else if (overrideMode === 'forced_downtime') {
-				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
-				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
-					_('Schedule Bypassed (Blocked Until Next Window)')
+					_('Schedule Bypassed')
 				]);
 			} else {
-				const windowState = (currentStatus === 'allowed') ? _('Open') : _('Curfew');
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Schedule Enforced (%s)').format(windowState)
+					_('Schedule Enforced')
 				]);
 			}
 
@@ -367,7 +359,7 @@ return view.extend({
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Natural Action Button
+			// Action Button
 			const actionBtn = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
@@ -380,7 +372,7 @@ return view.extend({
 					runAction('clear-override', actionBtn);
 				});
 			} else if (currentStatus === 'downtime') {
-				actionBtn.textContent = _('Pause Until Next Window');
+				actionBtn.textContent = _('Bypass Until Next Window');
 				actionBtn.addEventListener('click', function() {
 					runAction('ignore-downtime', actionBtn);
 				});
