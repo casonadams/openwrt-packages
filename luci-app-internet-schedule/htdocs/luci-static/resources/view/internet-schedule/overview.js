@@ -321,20 +321,35 @@ const CompactDayPicker = form.Value.extend({
 });
 
 return view.extend({
-	handleSaveApply: function(ev, mode) {
+	// Single "Save" button: instant commit & apply with zero staging or rollback modals
+	handleSaveApply: null,
+	handleReset: null,
+
+	handleSave: function(ev) {
 		const self = this;
-		ui.showIndicator('save-apply', _('Saving and applying schedule...'));
-		return this.handleSave(ev)
+		ui.showIndicator('save-op', _('Saving and applying changes...'));
+
+		const tasks = [];
+		document.getElementById('maincontent').querySelectorAll('.cbi-map').forEach(function(mapNode) {
+			const mapInst = dom.findClassInstance(mapNode);
+			if (mapInst && typeof(mapInst.save) === 'function') {
+				tasks.push(mapInst.save());
+			}
+		});
+
+		return Promise.all(tasks)
+			.then(function() {
+				return uci.commit('internet_schedule');
+			})
 			.then(function() {
 				return callExec('/usr/bin/internet-schedule', ['sync']);
 			})
 			.then(function() {
-				ui.hideIndicator('save-apply');
-				ui.addNotification(null, E('p', {}, _('Schedule configuration saved and applied successfully.')), 'success');
+				ui.hideIndicator('save-op');
 				window.location.reload();
 			})
 			.catch(function(err) {
-				ui.hideIndicator('save-apply');
+				ui.hideIndicator('save-op');
 				ui.addNotification(null, E('p', {}, err.message || err), 'danger');
 			});
 	},
@@ -355,8 +370,8 @@ return view.extend({
 		const stateRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'downtime|none';
 
 		const stateParts = stateRaw.split('|');
-		const currentStatus = stateParts[0] || 'downtime'; // 'downtime' (blocked) or 'allowed' (internet open)
-		const overrideMode = stateParts[1] || 'none';     // 'none', 'ignore_downtime', or 'forced_downtime'
+		const currentStatus = stateParts[0] || 'downtime';
+		const overrideMode = stateParts[1] || 'none';
 
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
 		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
@@ -371,7 +386,7 @@ return view.extend({
 
 		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
-		// 1. Natural Header Control Bar: "Pause Until Next Window" / "Resume Schedule"
+		// 1. Natural Header Control Bar: "Bypass Until Next Window" / "Resume Schedule"
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const runAction = function(cmd, el) {
@@ -390,8 +405,6 @@ return view.extend({
 			};
 
 			// Status badge
-			// Green = Normal Schedule is actively being enforced
-			// Red = Schedule is bypassed
 			let statusBadge;
 			if (overrideMode === 'ignore_downtime' || overrideMode === 'forced_downtime') {
 				statusBadge = E('div', {
@@ -414,10 +427,7 @@ return view.extend({
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Action Button:
-			// Red when "Bypass Until Next Window" (invoking a bypass)
-			// Blue when "Resume Schedule" (returning to normal schedule enforcement)
-			// Styled with 4px border-radius to match the Enabled/Disabled and Save & Apply buttons
+			// Action Button
 			const actionBtn = E('button', {
 				'type': 'button',
 				'class': 'cbi-button'
@@ -464,7 +474,6 @@ return view.extend({
 		// Active Switch (first column)
 		o = s.option(StatusFlag, 'enabled', _('Active'));
 		o.default = '1';
-		o.rmempty = false;
 
 		// Compact Day Picker (M T W T F S S)
 		o = s.option(CompactDayPicker, 'weekdays', _('Days'));
@@ -502,7 +511,6 @@ return view.extend({
 
 		o = s.option(StatusFlag, 'enabled', _('Active'));
 		o.default = '1';
-		o.rmempty = false;
 
 		o = s.option(form.Value, 'name', _('Device Friendly Name'));
 		o.placeholder = 'e.g. Roku Streambar Living Room';
