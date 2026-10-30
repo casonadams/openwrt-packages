@@ -1,10 +1,10 @@
 #!/bin/sh
 # /usr/bin/internet-schedule
 # Backend engine for luci-app-internet-schedule
-# Manages multi-schedules, temporary bonus screen time, firewall4 (nftables), and conntrack
+# Manages multi-schedules, "Ignore until tomorrow", firewall4 (nftables), and conntrack
 
 CRON_FILE="/etc/crontabs/root"
-BONUS_FILE="/etc/internet-schedule.bonus"
+OVERRIDE_FILE="/etc/internet-schedule.override"
 
 parse_time() {
 	raw=$(echo "$1" | tr 'A-Z' 'a-z' | tr -d ' ')
@@ -98,14 +98,14 @@ clean_firewall_rules() {
 	done
 }
 
-is_bonus_active() {
-	if [ -f "$BONUS_FILE" ]; then
-		expiry=$(cat "$BONUS_FILE" 2>/dev/null | tr -d ' \r\n')
-		now=$(date +%s)
-		if [ -n "$expiry" ] && [ "$expiry" -gt "$now" ] 2>/dev/null; then
+is_override_active() {
+	if [ -f "$OVERRIDE_FILE" ]; then
+		expiry_day=$(cat "$OVERRIDE_FILE" 2>/dev/null | tr -d ' \r\n')
+		today=$(date +%Y-%m-%d)
+		if [ "$expiry_day" = "$today" ]; then
 			return 0
 		else
-			rm -f "$BONUS_FILE"
+			rm -f "$OVERRIDE_FILE"
 		fi
 	fi
 	return 1
@@ -125,8 +125,8 @@ sync_firewall() {
 		return
 	fi
 
-	# If bonus time is currently active, all managed devices are granted access (no block rule)
-	if is_bonus_active; then
+	# If "Ignore Schedule for Today" is active, skip creating block rules
+	if is_override_active; then
 		uci commit firewall
 		fw4 reload >/dev/null 2>&1
 		update_cron
@@ -213,12 +213,10 @@ update_cron() {
 	sed -i '/internet-schedule/d' "$CRON_FILE"
 
 	if [ "$CFG_ENABLED" = "1" ]; then
-		# Check bonus expiry every minute if bonus active
-		if is_bonus_active; then
-			echo "* * * * * /usr/bin/internet-schedule check-bonus >/dev/null 2>&1" >> "$CRON_FILE"
-		fi
+		# Midnight reset for "Ignore for Today"
+		echo "0 0 * * * /usr/bin/internet-schedule check-override >/dev/null 2>&1" >> "$CRON_FILE"
 
-		# Normal schedules
+		# Schedule cutoff flushes
 		uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | while read -r line; do
 			sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
 			sec_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
@@ -246,55 +244,38 @@ update_cron() {
 	/etc/init.d/cron restart >/dev/null 2>&1
 }
 
-cmd_bonus_add() {
-	mins="$1"
-	[ -z "$mins" ] && mins=30
-
-	now=$(date +%s)
-	# If bonus already active, add to existing expiry
-	if is_bonus_active; then
-		curr_expiry=$(cat "$BONUS_FILE" 2>/dev/null | tr -d ' \r\n')
-		new_expiry=$((curr_expiry + mins * 60))
-	else
-		new_expiry=$((now + mins * 60))
-	fi
-
-	echo "$new_expiry" > "$BONUS_FILE"
+cmd_ignore_today() {
+	date +%Y-%m-%d > "$OVERRIDE_FILE"
 	sync_firewall
-	echo "Bonus time added: $mins minute(s)."
+	echo "Schedule ignored for today. Rules will automatically resume at midnight."
 	cmd_status
 }
 
-cmd_bonus_clear() {
-	rm -f "$BONUS_FILE"
+cmd_resume_schedule() {
+	rm -f "$OVERRIDE_FILE"
 	sync_firewall
 	flush_flows
-	echo "Bonus time cleared. Curfews re-enforced."
+	echo "Resumed schedule. Curfews re-enforced."
 	cmd_status
 }
 
-cmd_check_bonus() {
-	if [ -f "$BONUS_FILE" ]; then
-		expiry=$(cat "$BONUS_FILE" 2>/dev/null | tr -d ' \r\n')
-		now=$(date +%s)
-		if [ -z "$expiry" ] || [ "$now" -ge "$expiry" ]; then
-			rm -f "$BONUS_FILE"
+cmd_check_override() {
+	if [ -f "$OVERRIDE_FILE" ]; then
+		expiry_day=$(cat "$OVERRIDE_FILE" 2>/dev/null | tr -d ' \r\n')
+		today=$(date +%Y-%m-%d)
+		if [ "$expiry_day" != "$today" ]; then
+			rm -f "$OVERRIDE_FILE"
 			sync_firewall
 			flush_flows
 		fi
 	fi
 }
 
-cmd_get_bonus() {
-	if is_bonus_active; then
-		expiry=$(cat "$BONUS_FILE" 2>/dev/null | tr -d ' \r\n')
-		now=$(date +%s)
-		rem=$(((expiry - now) / 60))
-		[ "$rem" -lt 0 ] && rem=0
-		end_str=$(date -d "@$expiry" '+%I:%M %p' 2>/dev/null || date -r "$expiry" '+%I:%M %p' 2>/dev/null || echo "")
-		echo "active|$rem|$end_str"
+cmd_get_override() {
+	if is_override_active; then
+		echo "active"
 	else
-		echo "inactive|0|"
+		echo "inactive"
 	fi
 }
 
@@ -311,11 +292,8 @@ cmd_status() {
 	echo -n "Operating Mode : "
 	if [ "$CFG_ENABLED" != "1" ]; then
 		echo "DISABLED / OFF"
-	elif is_bonus_active; then
-		b_info=$(cmd_get_bonus)
-		rem=$(echo "$b_info" | cut -d'|' -f2)
-		end_t=$(echo "$b_info" | cut -d'|' -f3)
-		echo "BONUS ACTIVE: $rem min remaining (Ends at $end_t)"
+	elif is_override_active; then
+		echo "IGNORED FOR TODAY (Resumes at midnight)"
 	else
 		echo "SCHEDULE ACTIVE"
 	fi
@@ -342,7 +320,7 @@ cmd_status() {
 		[ -z "$ip" ] && ip="(offline)"
 
 		status="BLOCKED"
-		if [ "$CFG_ENABLED" != "1" ] || is_bonus_active; then
+		if [ "$CFG_ENABLED" != "1" ] || is_override_active; then
 			status="ALLOWED"
 		else
 			status="ENFORCED"
@@ -386,7 +364,7 @@ cmd_remove_device() {
 
 	uci show internet_schedule 2>/dev/null | grep -E "=device$" | while read -r line; do
 		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
-		name=$(uci -q get internet_schedule."$sec".name | tr 'A-F' 'a-f')
+		name=$(uci -q get internet_schedule."$sec".name || echo "Unnamed Device")
 		mac=$(uci -q get internet_schedule."$sec".mac | tr 'A-F' 'a-f')
 		if [ "$mac" = "$target" ] || [ "$name" = "$target" ]; then
 			uci -q delete internet_schedule."$sec"
@@ -400,10 +378,10 @@ cmd_remove_device() {
 
 case "$1" in
 	status)               cmd_status ;;
-	bonus-add)            shift; cmd_bonus_add "$@" ;;
-	bonus-clear)          cmd_bonus_clear ;;
-	check-bonus)          cmd_check_bonus ;;
-	get-bonus)            cmd_get_bonus ;;
+	ignore-today)         cmd_ignore_today ;;
+	resume-schedule)      cmd_resume_schedule ;;
+	check-override)       cmd_check_override ;;
+	get-override)         cmd_get_override ;;
 	add-device)           shift; cmd_add_device "$@" ;;
 	remove-device)        shift; cmd_remove_device "$@" ;;
 	sync)                 sync_firewall ;;
@@ -412,10 +390,10 @@ case "$1" in
 		echo "Usage: internet-schedule <command> [arguments]"
 		echo ""
 		echo "Commands:"
-		echo "  status                  Show current status, clock, and bonus state"
-		echo "  bonus-add <minutes>     Grant bonus screen time (e.g. 30, 60)"
-		echo "  bonus-clear             End bonus time immediately & resume schedule"
-		echo "  get-bonus               Get machine-readable bonus status"
+		echo "  status                  Show current status, clock, and override state"
+		echo "  ignore-today            Ignore schedules for today (auto-resumes tomorrow)"
+		echo "  resume-schedule         Re-enforce schedules immediately"
+		echo "  get-override            Get machine-readable override status"
 		echo "  add-device <name> <mac> Add a target device"
 		echo "  remove-device <name>    Remove a target device"
 		echo "  sync                    Sync firewall rules with configuration"
