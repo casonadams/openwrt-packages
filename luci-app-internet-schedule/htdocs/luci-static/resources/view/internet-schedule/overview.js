@@ -318,14 +318,14 @@ return view.extend({
 		}
 		o.default = '90';
 
-		// Calculated Cutoff Preview
-		o = s.option(form.DummyValue, '_cutoff', _('Calculated Cutoff'));
+		// Calculated End Time Preview
+		o = s.option(form.DummyValue, '_cutoff', _('End Time'));
 		o.rawhtml = true;
 		o.cfgvalue = function(section_id) {
 			const start = uci.get('internet_schedule', section_id, 'start_time') || '18:00:00';
 			const dur = uci.get('internet_schedule', section_id, 'duration') || '90';
 			const cutoffStr = calcCutoffLabel(start, dur);
-			return '<span style="font-weight:bold;color:#007bff;display:inline-block;padding:2px 0;">→ Ends at ' + cutoffStr + '</span>';
+			return '<span style="font-weight:600;display:inline-block;padding:2px 0;">' + cutoffStr + '</span>';
 		};
 
 		// Enabled Switch per schedule
