@@ -56,9 +56,9 @@ function parse12to24(h12, m, ampm) {
 function formatDurationLabel(mins) {
 	const h = Math.floor(mins / 60);
 	const m = mins % 60;
-	if (h > 0 && m > 0) return h + ' hr ' + m + ' min';
-	if (h > 0) return h + (h === 1 ? ' hour' : ' hours');
-	return m + ' min';
+	if (h > 0 && m > 0) return h + 'h ' + m + 'm';
+	if (h > 0) return h + 'h';
+	return m + 'm';
 }
 
 function calcCutoffLabel(start24, durationMins) {
@@ -80,7 +80,7 @@ function calcCutoffLabel(start24, durationMins) {
 	if (h12 === 0) h12 = 12;
 	const mStr = (stopM < 10 ? '0' : '') + stopM;
 
-	return h12 + ':' + mStr + ' ' + ampm + (nextDay ? ' (next day)' : '');
+	return h12 + ':' + mStr + ' ' + ampm + (nextDay ? ' (+1d)' : '');
 }
 
 // 12-Hour Dropdown Time Picker
@@ -90,7 +90,7 @@ const TimePicker12h = form.Value.extend({
 
 		const hourSelect = E('select', {
 			'class': 'cbi-input-select',
-			'style': 'width:auto;display:inline-block;margin-right:4px;font-weight:600;'
+			'style': 'width:auto;display:inline-block;margin-right:2px;font-weight:600;padding:2px 4px;'
 		});
 		for (let h = 1; h <= 12; h++) {
 			hourSelect.appendChild(E('option', {
@@ -101,7 +101,7 @@ const TimePicker12h = form.Value.extend({
 
 		const minSelect = E('select', {
 			'class': 'cbi-input-select',
-			'style': 'width:auto;display:inline-block;margin-right:4px;font-family:monospace;'
+			'style': 'width:auto;display:inline-block;margin-right:2px;font-family:monospace;padding:2px 4px;'
 		});
 		for (let m = 0; m < 60; m += 5) {
 			const mStr = (m < 10 ? '0' : '') + m;
@@ -113,7 +113,7 @@ const TimePicker12h = form.Value.extend({
 
 		const ampmSelect = E('select', {
 			'class': 'cbi-input-select',
-			'style': 'width:auto;display:inline-block;font-weight:700;'
+			'style': 'width:auto;display:inline-block;font-weight:700;padding:2px 4px;'
 		});
 		ampmSelect.appendChild(E('option', {
 			'value': 'AM',
@@ -169,8 +169,8 @@ const StatusFlag = form.Value.extend({
 			'type': 'button',
 			'class': 'cbi-button',
 			'style': isEnabled
-				? 'padding:3px 10px;font-size:11px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid transparent;cursor:pointer;min-width:68px;text-align:center;'
-				: 'padding:3px 10px;font-size:11px;font-weight:600;border-radius:4px;background:transparent;color:inherit;opacity:0.5;border:1px solid rgba(127,127,127,0.4);cursor:pointer;min-width:68px;text-align:center;'
+				? 'padding:3px 8px;font-size:11px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid transparent;cursor:pointer;min-width:62px;text-align:center;'
+				: 'padding:3px 8px;font-size:11px;font-weight:600;border-radius:4px;background:transparent;color:inherit;opacity:0.5;border:1px solid rgba(127,127,127,0.4);cursor:pointer;min-width:62px;text-align:center;'
 		}, isEnabled ? _('Enabled') : _('Disabled'));
 
 		btn.addEventListener('click', function(ev) {
@@ -235,7 +235,7 @@ const CompactDayPicker = form.Value.extend({
 
 		const container = E('div', {
 			'class': 'compact-day-picker',
-			'style': 'display:inline-flex;gap:3px;align-items:center;min-width:180px;'
+			'style': 'display:inline-flex;gap:2px;align-items:center;'
 		});
 
 		days.forEach(function(d) {
@@ -245,8 +245,8 @@ const CompactDayPicker = form.Value.extend({
 				'title': d.title,
 				'class': 'cbi-button',
 				'style': active
-					? 'min-width:22px;height:24px;padding:0 3px;font-size:11px;font-weight:700;line-height:22px;border-radius:3px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;'
-					: 'min-width:22px;height:24px;padding:0 3px;font-size:11px;font-weight:600;line-height:22px;border-radius:3px;background:transparent;opacity:0.45;border:1px solid rgba(127,127,127,0.4);cursor:pointer;'
+					? 'min-width:20px;height:22px;padding:0 2px;font-size:11px;font-weight:700;line-height:20px;border-radius:3px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;'
+					: 'min-width:20px;height:22px;padding:0 2px;font-size:11px;font-weight:600;line-height:20px;border-radius:3px;background:transparent;opacity:0.45;border:1px solid rgba(127,127,127,0.4);cursor:pointer;'
 			}, d.label);
 
 			btn.addEventListener('click', function(ev) {
@@ -307,12 +307,8 @@ return view.extend({
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
 		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
 		const routerDate = new Date(routerTimestamp);
-		const routerDateStr = routerDate.toLocaleString('en-US', {
+		const routerTimeStr = routerDate.toLocaleTimeString('en-US', {
 			timeZone: 'UTC',
-			hour12: true,
-			month: 'short',
-			day: 'numeric',
-			year: 'numeric',
 			hour: 'numeric',
 			minute: '2-digit'
 		});
@@ -322,7 +318,7 @@ return view.extend({
 		m = new form.Map('internet_schedule', _('Internet Schedule'),
 			_('Curfew and screen time access control for kids, smart TVs, and streaming devices.'));
 
-		// 1. Simplified Control Header Bar: Clock + Bonus Controls
+		// 1. Mobile-First Pill Bar: Status + Clock + Touch-Friendly Bonus Pills
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const runBonusAdd = function(mins, el) {
@@ -359,77 +355,64 @@ return view.extend({
 			let statusBadge;
 			if (isBonusActive) {
 				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700;'
+					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
-					E('span', { 'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;background:#28a745;margin-right:8px;' }),
-					_('Bonus Active: %s min remaining (Ends at %s)').format(bonusRemMins, bonusEndTime)
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
+					_('Bonus Active (%sm left · Ends %s)').format(bonusRemMins, bonusEndTime)
 				]);
 			} else {
 				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(0,123,255,0.12);color:#007bff;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700;'
+					'style': 'display:inline-flex;align-items:center;background:rgba(0,123,255,0.12);color:#007bff;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
-					E('span', { 'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;background:#007bff;margin-right:8px;' }),
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#007bff;margin-right:6px;' }),
 					_('Schedule Active')
 				]);
 			}
 
-			// Clock pill
-			const clockPill = E('div', {
+			// Clean Router Wall-Clock
+			const clockBadge = E('div', {
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
-			}, routerDateStr + ' (' + routerTzName + ')');
+			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Quick Bonus Action Buttons
-			const bonusButtons = [];
+			// Quick Bonus Action Pills (Touch-Friendly)
+			const bonusControls = E('div', {
+				'style': 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;'
+			});
 
-			// If bonus is active, show the "End Bonus" button
-			if (isBonusActive) {
-				const btnClear = E('button', {
+			const makePillBtn = function(label, mins, isDanger) {
+				const btn = E('button', {
 					'type': 'button',
 					'class': 'cbi-button',
-					'style': 'padding:5px 12px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:pointer;'
-				}, _('End Bonus'));
-				btnClear.addEventListener('click', function() { runBonusClear(btnClear); });
-				bonusButtons.push(btnClear);
+					'style': isDanger
+						? 'padding:3px 10px;font-size:11px;font-weight:700;border-radius:12px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;'
+						: 'padding:3px 10px;font-size:11px;font-weight:600;border-radius:12px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
+				}, label);
+
+				if (isDanger) {
+					btn.addEventListener('click', function() { runBonusClear(btn); });
+				} else {
+					btn.addEventListener('click', function() { runBonusAdd(mins, btn); });
+				}
+				return btn;
+			};
+
+			if (isBonusActive) {
+				bonusControls.appendChild(makePillBtn(_('End Bonus'), 0, true));
 			}
 
-			// Preset "+30m" button
-			const btn30 = E('button', {
-				'type': 'button',
-				'class': 'cbi-button',
-				'style': 'padding:5px 12px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, _('+30m Bonus'));
-			btn30.addEventListener('click', function() { runBonusAdd(30, btn30); });
-			bonusButtons.push(btn30);
-
-			// Duration dropdown selector for custom bonus lengths
-			const bonusSelect = E('select', {
-				'class': 'cbi-input-select',
-				'title': _('Grant custom bonus time'),
-				'style': 'padding:5px 8px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;background:transparent;'
-			}, [
-				E('option', { 'value': '', 'disabled': '', 'selected': '' }, '+ More...'),
-				E('option', { 'value': '15' }, '+ 15m'),
-				E('option', { 'value': '45' }, '+ 45m'),
-				E('option', { 'value': '60' }, '+ 1 hr'),
-				E('option', { 'value': '90' }, '+ 1.5 hr'),
-				E('option', { 'value': '120' }, '+ 2 hr')
-			]);
-			bonusSelect.addEventListener('change', function() {
-				if (this.value) {
-					runBonusAdd(parseInt(this.value, 10), bonusSelect);
-				}
-			});
-			bonusButtons.push(bonusSelect);
+			bonusControls.appendChild(makePillBtn('+15m', 15, false));
+			bonusControls.appendChild(makePillBtn('+30m', 30, false));
+			bonusControls.appendChild(makePillBtn('+1h', 60, false));
 
 			return E('div', {
 				'class': 'cbi-section',
-				'style': 'margin-bottom:15px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;'
+				'style': 'margin-bottom:12px;padding:8px 12px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;'
 			}, [
-				E('div', { 'style': 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;' }, [
+				bonusControls,
+				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					statusBadge,
-					clockPill
-				]),
-				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, bonusButtons)
+					clockBadge
+				])
 			]);
 		};
 
