@@ -403,14 +403,8 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
-		// Friendly Schedule Name (Schedule A, B...)
-		o = s.option(form.Value, 'name', _('Schedule Name'));
-		o.placeholder = 'e.g. Schedule A (Weekdays)';
-		o.default = 'Schedule A';
-		o.rmempty = false;
-
 		// Compact Day Picker (M T W T F S S)
-		o = s.option(CompactDayPicker, 'weekdays', _('Active Days'));
+		o = s.option(CompactDayPicker, 'weekdays', _('Days'));
 		o.default = 'all';
 
 		// Start Time (12-Hour Dropdowns)
