@@ -32,6 +32,11 @@
 					"restart",
 					"reload"
 				]
+			},
+			"file": {
+				"/usr/bin/internet-schedule": [
+					"exec"
+				]
 			}
 		}
 	}
