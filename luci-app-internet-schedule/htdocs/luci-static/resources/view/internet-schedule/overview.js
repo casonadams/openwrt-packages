@@ -312,9 +312,8 @@ return view.extend({
 		o.value('block', _('Emergency Lockdown (Block All Right Now)'));
 		o.default = 'schedule';
 
-		// 3. Multi-Schedule Builder (Schedule A, Schedule B, Schedule C...)
-		s = m.section(form.TableSection, 'schedule', _('Configured Schedules (Schedule A, B, C...)'),
-			_('Easily configure separate schedules for weekdays, weekends, or specific days with custom start times and durations. The cutoff time is calculated automatically, and streaming streams terminate immediately at cutoff.'));
+		// 3. Schedules Section
+		s = m.section(form.TableSection, 'schedule', _('Schedules'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
