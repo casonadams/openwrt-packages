@@ -83,7 +83,7 @@ function calcCutoffLabel(start24, durationMins) {
 	return h12 + ':' + mStr + ' ' + ampm + (nextDay ? ' (next day)' : '');
 }
 
-// Custom 12-Hour Dropdown Time Picker
+// 12-Hour Dropdown Time Picker
 const TimePicker12h = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		const parsed = parse24to12(cfgvalue);
@@ -153,7 +153,7 @@ const TimePicker12h = form.Value.extend({
 	}
 });
 
-// StatusFlag: Interactive pill button (Enabled/Disabled) matching the day button aesthetic
+// Interactive Pill Button (Enabled/Disabled)
 const StatusFlag = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		let isEnabled = (cfgvalue !== '0' && cfgvalue !== false && cfgvalue !== '');
@@ -203,7 +203,7 @@ const StatusFlag = form.Value.extend({
 	}
 });
 
-// Compact Day Picker Component (M T W T F S S pill buttons)
+// Compact Day Picker Component (M T W T F S S)
 const CompactDayPicker = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		let selectedDays = [];
@@ -289,20 +289,22 @@ return view.extend({
 			uci.load('internet_schedule'),
 			uci.load('system'),
 			callHostHints(),
-			callSystemInfo()
+			callSystemInfo(),
+			callExec('/usr/bin/internet-schedule', ['get-bonus'])
 		]);
 	},
 
 	render: function(data) {
 		const hostHints = data[2] || {};
 		const sysInfo = data[3] || {};
+		const bonusRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'inactive|0|';
+
+		const bonusParts = bonusRaw.split('|');
+		const isBonusActive = (bonusParts[0] === 'active');
+		const bonusRemMins = parseInt(bonusParts[1], 10) || 0;
+		const bonusEndTime = bonusParts[2] || '';
 
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
-		const routerTz = uci.get('system', '@system[0]', 'timezone') || 'GMT0';
-		const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Unknown';
-
-		const tzMatch = (routerTzName === browserTz || (routerTzName.indexOf(browserTz) !== -1));
-
 		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
 		const routerDate = new Date(routerTimestamp);
 		const routerDateStr = routerDate.toLocaleString('en-US', {
@@ -312,17 +314,7 @@ return view.extend({
 			day: 'numeric',
 			year: 'numeric',
 			hour: 'numeric',
-			minute: '2-digit',
-			second: '2-digit'
-		});
-		const browserDateStr = new Date().toLocaleString('en-US', {
-			hour12: true,
-			month: 'short',
-			day: 'numeric',
-			year: 'numeric',
-			hour: 'numeric',
-			minute: '2-digit',
-			second: '2-digit'
+			minute: '2-digit'
 		});
 
 		let m, s, o;
@@ -330,158 +322,114 @@ return view.extend({
 		m = new form.Map('internet_schedule', _('Internet Schedule'),
 			_('Curfew and screen time access control for kids, smart TVs, and streaming devices.'));
 
-		// 1. Unified Control Bar: Timezone badge & Instant Override Buttons
+		// 1. Simplified Control Header Bar: Clock + Bonus Controls
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
-			const currentMode = uci.get('internet_schedule', 'settings', 'mode') || 'schedule';
-			const isEnabled = uci.get('internet_schedule', 'settings', 'enabled') !== '0';
-
-			const runAction = function(modeVal, btnEl) {
-				btnEl.disabled = true;
-				ui.showIndicator('override-op', _('Applying override...'));
-				uci.set('internet_schedule', 'settings', 'enabled', '1');
-				uci.set('internet_schedule', 'settings', 'mode', modeVal);
-				uci.save()
-					.then(function() { return uci.apply(); })
-					.then(function() { return callExec('/usr/bin/internet-schedule', ['sync']); })
+			const runBonusAdd = function(mins, el) {
+				el.disabled = true;
+				ui.showIndicator('bonus-op', _('Adding bonus time...'));
+				callExec('/usr/bin/internet-schedule', ['bonus-add', String(mins)])
 					.then(function() {
-						ui.hideIndicator('override-op');
+						ui.hideIndicator('bonus-op');
 						window.location.reload();
 					})
 					.catch(function(err) {
-						ui.hideIndicator('override-op');
-						btnEl.disabled = false;
+						ui.hideIndicator('bonus-op');
+						el.disabled = false;
 						ui.addNotification(null, E('p', {}, err.message || err));
 					});
 			};
 
-			const runBonus = function(minutes, btnEl) {
-				btnEl.disabled = true;
-				ui.showIndicator('override-op', _('Granting bonus time...'));
-				callExec('/usr/bin/internet-schedule', ['allow-now', String(minutes)])
+			const runBonusClear = function(el) {
+				el.disabled = true;
+				ui.showIndicator('bonus-op', _('Ending bonus time...'));
+				callExec('/usr/bin/internet-schedule', ['bonus-clear'])
 					.then(function() {
-						ui.hideIndicator('override-op');
+						ui.hideIndicator('bonus-op');
 						window.location.reload();
 					})
 					.catch(function(err) {
-						ui.hideIndicator('override-op');
-						btnEl.disabled = false;
+						ui.hideIndicator('bonus-op');
+						el.disabled = false;
 						ui.addNotification(null, E('p', {}, err.message || err));
 					});
 			};
 
-			// Status indicator pill
-			let statusPill;
-			if (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled') {
-				statusPill = E('span', {
-					'style': 'background:#28a745;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+			// Status badge
+			let statusBadge;
+			if (isBonusActive) {
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700;'
 				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
-					_('UNLOCKED')
-				]);
-			} else if (currentMode === 'block') {
-				statusPill = E('span', {
-					'style': 'background:#dc3545;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
-				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
-					_('LOCKED DOWN')
+					E('span', { 'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;background:#28a745;margin-right:8px;' }),
+					_('Bonus Active: %s min remaining (Ends at %s)').format(bonusRemMins, bonusEndTime)
 				]);
 			} else {
-				statusPill = E('span', {
-					'style': 'background:#007bff;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(0,123,255,0.12);color:#007bff;padding:6px 12px;border-radius:20px;font-size:12px;font-weight:700;'
 				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
-					_('SCHEDULE ENFORCED')
+					E('span', { 'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;background:#007bff;margin-right:8px;' }),
+					_('Schedule Active')
 				]);
 			}
 
-			// Timezone / clock pill
-			const tzPill = E('span', {
-				'title': tzMatch ? _('Router timezone matches your local time') : _('Warning: Router is in %s while browser is in %s').format(routerTzName, browserTz),
-				'style': tzMatch
-					? 'background:rgba(127,127,127,0.12);color:inherit;font-size:12px;font-weight:500;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
-					: 'background:rgba(255,193,7,0.2);color:#856404;font-size:12px;font-weight:600;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
-			}, [
-				E('span', { 'style': 'margin-right:5px;' }, tzMatch ? '🕒' : '⚠️'),
-				routerDateStr.split(',')[1] ? routerDateStr.split(',')[1].trim() : routerDateStr,
-				E('span', { 'style': 'opacity:0.6;margin-left:4px;' }, '(' + routerTzName + ')')
-			]);
+			// Clock pill
+			const clockPill = E('div', {
+				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
+			}, routerDateStr + ' (' + routerTzName + ')');
 
-			// Clean, unified action buttons
-			// 1. Enforce Schedule
-			const isScheduleActive = (isEnabled && currentMode === 'schedule');
-			const btnSchedule = E('button', {
-				'type': 'button',
-				'class': 'cbi-button',
-				'style': isScheduleActive
-					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#007bff;color:#fff;border:1px solid #007bff;cursor:default;'
-					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, _('Enforce Schedule'));
-			if (!isScheduleActive) {
-				btnSchedule.addEventListener('click', function() { runAction('schedule', btnSchedule); });
+			// Quick Bonus Action Buttons
+			const bonusButtons = [];
+
+			// If bonus is active, show the "End Bonus" button
+			if (isBonusActive) {
+				const btnClear = E('button', {
+					'type': 'button',
+					'class': 'cbi-button',
+					'style': 'padding:5px 12px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:pointer;'
+				}, _('End Bonus'));
+				btnClear.addEventListener('click', function() { runBonusClear(btnClear); });
+				bonusButtons.push(btnClear);
 			}
 
-			// 2. Unlock (Infinite)
-			const isUnlocked = (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled');
-			const btnUnlock = E('button', {
+			// Preset "+30m" button
+			const btn30 = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
-				'style': isUnlocked
-					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid #28a745;cursor:default;'
-					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, _('Unlock'));
-			if (!isUnlocked) {
-				btnUnlock.addEventListener('click', function() { runAction('unlocked', btnUnlock); });
-			}
+				'style': 'padding:5px 12px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
+			}, _('+30m Bonus'));
+			btn30.addEventListener('click', function() { runBonusAdd(30, btn30); });
+			bonusButtons.push(btn30);
 
-			// 3. Unlock with Preset Dropdown: [+ 1 hr ▼]
-			const durSelect = E('select', {
+			// Duration dropdown selector for custom bonus lengths
+			const bonusSelect = E('select', {
 				'class': 'cbi-input-select',
-				'title': _('Select duration and click to unlock'),
-				'style': 'padding:5px 8px;font-size:12px;font-weight:600;border-radius:4px;margin:0;cursor:pointer;background:transparent;'
+				'title': _('Grant custom bonus time'),
+				'style': 'padding:5px 8px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;background:transparent;'
 			}, [
-				E('option', { 'value': '', 'disabled': '', 'selected': '' }, '+ Temporary...'),
+				E('option', { 'value': '', 'disabled': '', 'selected': '' }, '+ More...'),
 				E('option', { 'value': '15' }, '+ 15m'),
-				E('option', { 'value': '30' }, '+ 30m'),
 				E('option', { 'value': '45' }, '+ 45m'),
 				E('option', { 'value': '60' }, '+ 1 hr'),
 				E('option', { 'value': '90' }, '+ 1.5 hr'),
-				E('option', { 'value': '120' }, '+ 2 hr'),
-				E('option', { 'value': '180' }, '+ 3 hr')
+				E('option', { 'value': '120' }, '+ 2 hr')
 			]);
-			durSelect.addEventListener('change', function() {
+			bonusSelect.addEventListener('change', function() {
 				if (this.value) {
-					runBonus(parseInt(this.value, 10), durSelect);
+					runBonusAdd(parseInt(this.value, 10), bonusSelect);
 				}
 			});
-
-			// 4. Lockdown
-			const isBlocked = (isEnabled && currentMode === 'block');
-			const btnBlock = E('button', {
-				'type': 'button',
-				'class': 'cbi-button',
-				'style': isBlocked
-					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:default;'
-					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, _('Lockdown'));
-			if (!isBlocked) {
-				btnBlock.addEventListener('click', function() { runAction('block', btnBlock); });
-			}
+			bonusButtons.push(bonusSelect);
 
 			return E('div', {
 				'class': 'cbi-section',
 				'style': 'margin-bottom:15px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;'
 			}, [
-				E('div', { 'style': 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;' }, [
-					statusPill,
-					tzPill
+				E('div', { 'style': 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;' }, [
+					statusBadge,
+					clockPill
 				]),
-				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
-					btnSchedule,
-					btnUnlock,
-					durSelect,
-					btnBlock
-				])
+				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, bonusButtons)
 			]);
 		};
 
@@ -524,7 +472,7 @@ return view.extend({
 			return '<span style="font-weight:600;display:inline-block;padding:2px 0;">' + cutoffStr + '</span>';
 		};
 
-		// 4. Devices Section
+		// 3. Devices Section
 		s = m.section(form.TableSection, 'device', _('Devices'));
 		s.anonymous = true;
 		s.addremove = true;
