@@ -46,15 +46,44 @@ function parse12to24(h12, m, ampm) {
 	return hStr + ':' + mStr + ':00';
 }
 
-// Custom 12-Hour Interactive Time Picker CBI Widget
+function formatDurationLabel(mins) {
+	const h = Math.floor(mins / 60);
+	const m = mins % 60;
+	if (h > 0 && m > 0) return h + ' hr ' + m + ' min';
+	if (h > 0) return h + (h === 1 ? ' hour' : ' hours');
+	return m + ' min';
+}
+
+function calcCutoffLabel(start24, durationMins) {
+	const parts = String(start24 || '18:00:00').split(':');
+	let h = parseInt(parts[0], 10);
+	if (isNaN(h)) h = 18;
+	let m = parseInt(parts[1], 10);
+	if (isNaN(m)) m = 0;
+	const dur = parseInt(durationMins, 10) || 90;
+
+	const startTot = h * 60 + m;
+	const stopTot = (startTot + dur) % 1440;
+	const nextDay = (startTot + dur) >= 1440;
+
+	const stopH = Math.floor(stopTot / 60);
+	const stopM = stopTot % 60;
+	const ampm = (stopH >= 12) ? 'PM' : 'AM';
+	let h12 = stopH % 12;
+	if (h12 === 0) h12 = 12;
+	const mStr = (stopM < 10 ? '0' : '') + stopM;
+
+	return h12 + ':' + mStr + ' ' + ampm + (nextDay ? ' (next day)' : '');
+}
+
+// 12-Hour Dropdown Time Picker Component
 const TimePicker12h = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		const parsed = parse24to12(cfgvalue);
-		const self = this;
 
 		const hourSelect = E('select', {
 			'class': 'cbi-input-select',
-			'style': 'width:auto;display:inline-block;margin-right:6px;font-weight:600;'
+			'style': 'width:auto;display:inline-block;margin-right:4px;font-weight:600;'
 		});
 		for (let h = 1; h <= 12; h++) {
 			hourSelect.appendChild(E('option', {
@@ -65,7 +94,7 @@ const TimePicker12h = form.Value.extend({
 
 		const minSelect = E('select', {
 			'class': 'cbi-input-select',
-			'style': 'width:auto;display:inline-block;margin-right:6px;font-family:monospace;'
+			'style': 'width:auto;display:inline-block;margin-right:4px;font-family:monospace;'
 		});
 		for (let m = 0; m < 60; m += 5) {
 			const mStr = (m < 10 ? '0' : '') + m;
@@ -107,7 +136,7 @@ const TimePicker12h = form.Value.extend({
 
 		return E('div', {
 			'class': 'time-picker-12h',
-			'style': 'display:inline-flex;align-items:center;padding:4px 0;'
+			'style': 'display:inline-flex;align-items:center;padding:2px 0;'
 		}, [
 			hourSelect,
 			minSelect,
@@ -164,7 +193,7 @@ return view.extend({
 		m = new form.Map('internet_schedule', _('Internet Access Schedule'),
 			_('Automated daily internet curfew and access control for kids, smart TVs, and streaming devices.'));
 
-		// Custom Hero Header styled with OpenWrt theme classes (ifacebox/cbi-section)
+		// 1. Hero Summary Header (Theme-adaptive with boundary protection)
 		s = m.section(form.NamedSection, 'settings', 'settings', _('System & Timezone Alignment'));
 		s.render = function() {
 			const tzBannerClass = tzMatch ? 'alert-message notice success' : 'alert-message warning';
@@ -180,18 +209,18 @@ return view.extend({
 			if (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled') {
 				modeBadge = E('span', {
 					'class': 'badge',
-					'style': 'background-color:#28a745;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
-				}, _('UNLOCKED (Full Access)'));
+					'style': 'background-color:#28a745;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
+				}, _('UNLOCKED — Full Access'));
 			} else if (currentMode === 'block') {
 				modeBadge = E('span', {
 					'class': 'badge',
-					'style': 'background-color:#dc3545;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
-				}, _('LOCKED DOWN (Emergency Block)'));
+					'style': 'background-color:#dc3545;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
+				}, _('LOCKED DOWN — Emergency Block'));
 			} else {
 				modeBadge = E('span', {
 					'class': 'badge',
-					'style': 'background-color:#007bff;color:#ffffff;padding:5px 10px;font-weight:700;border-radius:4px;display:inline-block;'
-				}, _('SCHEDULE ACTIVE (Enforcing Hours)'));
+					'style': 'background-color:#007bff;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
+				}, _('SCHEDULE ACTIVE — Enforcing Curfew'));
 			}
 
 			return E('div', { 'class': 'cbi-section' }, [
@@ -203,77 +232,110 @@ return view.extend({
 				]),
 				E('div', {
 					'class': 'cbi-section-node',
-					'style': 'display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:15px;margin-bottom:15px;'
+					'style': 'display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:15px;'
 				}, [
 					// Card 1: Router Clock
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
 						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Router System Clock')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
-							E('div', { 'style': 'font-size:16px;font-weight:bold;margin-bottom:4px;' }, routerDateStr),
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
+							E('div', { 'style': 'font-size:15px;font-weight:bold;margin-bottom:4px;' }, routerDateStr),
 							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, routerTzName + ' (' + routerTz + ')')
 						])
 					]),
 					// Card 2: Browser Clock
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
 						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Your Browser Clock')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
-							E('div', { 'style': 'font-size:16px;font-weight:bold;margin-bottom:4px;' }, browserDateStr),
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
+							E('div', { 'style': 'font-size:15px;font-weight:bold;margin-bottom:4px;' }, browserDateStr),
 							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, browserTz)
 						])
 					]),
 					// Card 3: Current Policy State
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;' }, [
+					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
 						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Enforcement Status')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:14px;' }, [
-							E('div', { 'style': 'margin-top:4px;' }, modeBadge),
-							E('div', { 'style': 'opacity:0.8;font-size:12px;margin-top:6px;' }, _('Managed by firewall4 kernel rules'))
+						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
+							E('div', { 'style': 'margin-top:2px;' }, modeBadge),
+							E('div', { 'style': 'opacity:0.8;font-size:11px;margin-top:6px;' }, _('firewall4 nftables rules'))
 						])
 					])
 				])
 			]);
 		};
 
-		// Schedule Controls Section
-		s = m.section(form.NamedSection, 'settings', 'settings', _('Schedule Configuration'));
+		// 2. Master Policy & Override Controls
+		s = m.section(form.NamedSection, 'settings', 'settings', _('Master Override Controls'));
 		s.anonymous = true;
 		s.addremove = false;
 
-		o = s.option(form.Flag, 'enabled', _('Enable Schedule'),
-			_('When disabled, all rules are turned off and devices have unrestricted internet access.'));
+		o = s.option(form.Flag, 'enabled', _('Master Schedule Switch'),
+			_('Turn off to pause all schedules and give devices unrestricted internet access.'));
 		o.default = '1';
 		o.rmempty = false;
 
-		o = s.option(form.ListValue, 'mode', _('Operating Mode'),
-			_('Quick override without deleting your schedule.'));
-		o.value('schedule', _('Enforce Daily Schedule'));
-		o.value('unlocked', _('Unlock All (Unrestricted Access)'));
+		o = s.option(form.ListValue, 'mode', _('Instant Override Mode'),
+			_('Override scheduled times without deleting your configured schedules.'));
+		o.value('schedule', _('Enforce Configured Schedules (Normal)'));
+		o.value('unlocked', _('Unlock All (Unrestricted Internet)'));
 		o.value('block', _('Emergency Lockdown (Block All Right Now)'));
 		o.default = 'schedule';
 
-		// 12-Hour Dropdown Time Pickers
-		o = s.option(TimePicker12h, 'start_time', _('Daily Allowed Start Time'),
-			_('Time of day when internet access opens for target devices.'));
-		o.default = '18:00:00';
+		// 3. Multi-Schedule Builder (Schedule A, Schedule B, Schedule C...)
+		s = m.section(form.TableSection, 'schedule', _('Configured Schedules (Schedule A, B, C...)'),
+			_('Easily configure separate schedules for weekdays, weekends, or specific days with custom start times and durations. The cutoff time is calculated automatically, and streaming streams terminate immediately at cutoff.'));
+		s.anonymous = true;
+		s.addremove = true;
+		s.sortable = true;
 
-		o = s.option(TimePicker12h, 'stop_time', _('Daily Allowed Cutoff Time'),
-			_('Time of day when internet access cuts off and active video streams are terminated.'));
-		o.default = '19:30:00';
+		// Friendly Schedule Name (Schedule A, B...)
+		o = s.option(form.Value, 'name', _('Schedule Name'));
+		o.placeholder = 'e.g. Schedule A (Weekdays)';
+		o.default = 'Schedule A';
+		o.rmempty = false;
 
-		o = s.option(form.MultiValue, 'weekdays', _('Active Days of Week'),
-			_('Days of the week this schedule is enforced.'));
-		o.value('all', _('All Days (Mon-Sun)'));
-		o.value('Mon', _('Monday'));
-		o.value('Tue', _('Tuesday'));
-		o.value('Wed', _('Wednesday'));
-		o.value('Thu', _('Thursday'));
-		o.value('Fri', _('Friday'));
-		o.value('Sat', _('Saturday'));
-		o.value('Sun', _('Sunday'));
+		// Active Days
+		o = s.option(form.MultiValue, 'weekdays', _('Active Days'));
+		o.value('all', _('Everyday'));
+		o.value('Mon', _('Mon'));
+		o.value('Tue', _('Tue'));
+		o.value('Wed', _('Wed'));
+		o.value('Thu', _('Thu'));
+		o.value('Fri', _('Fri'));
+		o.value('Sat', _('Sat'));
+		o.value('Sun', _('Sun'));
 		o.default = 'all';
 
-		// Managed Devices Section (Table with Device Auto-Discovery)
+		// Start Time (12-Hour Dropdowns)
+		o = s.option(TimePicker12h, 'start_time', _('Start Time'));
+		o.default = '18:00:00';
+
+		// Duration Dropdown
+		o = s.option(form.ListValue, 'duration', _('Duration'));
+		const durations = [
+			15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300, 360
+		];
+		for (let i = 0; i < durations.length; i++) {
+			o.value(String(durations[i]), formatDurationLabel(durations[i]));
+		}
+		o.default = '90';
+
+		// Calculated Cutoff Preview
+		o = s.option(form.DummyValue, '_cutoff', _('Calculated Cutoff'));
+		o.rawhtml = true;
+		o.cfgvalue = function(section_id) {
+			const start = uci.get('internet_schedule', section_id, 'start_time') || '18:00:00';
+			const dur = uci.get('internet_schedule', section_id, 'duration') || '90';
+			const cutoffStr = calcCutoffLabel(start, dur);
+			return '<span style="font-weight:bold;color:#007bff;display:inline-block;padding:2px 0;">→ Ends at ' + cutoffStr + '</span>';
+		};
+
+		// Enabled Switch per schedule
+		o = s.option(form.Flag, 'enabled', _('Active'));
+		o.default = '1';
+		o.rmempty = false;
+
+		// 4. Target Devices Section (Table with Device Auto-Discovery)
 		s = m.section(form.TableSection, 'device', _('Target Devices to Restrict'),
-			_('Add the devices you want subject to the schedule (Rokus, Samsung TVs, tablets, gaming consoles). All unlisted household devices remain unrestricted.'));
+			_('Select the devices subject to these schedules (Rokus, Samsung TVs, tablets, gaming consoles). All unlisted household devices remain unrestricted.'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
