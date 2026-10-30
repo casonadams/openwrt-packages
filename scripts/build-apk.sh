@@ -17,7 +17,10 @@ OUTPUT_DIR="${OUTPUT_DIR:-dist}"
 if ! command -v apk >/dev/null 2>&1 || ! apk --help 2>&1 | grep -q mkpkg; then
 	if command -v docker >/dev/null 2>&1; then
 		echo "apk mkpkg not found locally; executing build inside alpine:edge container..."
-		exec docker run --rm -v "$(pwd):/work" -w /work -e VERSION="$VERSION" -e OUTPUT_DIR="$OUTPUT_DIR" alpine:edge ./scripts/build-apk.sh "$PKG"
+		exec docker run --rm -v "$(pwd):/work" -w /work \
+			-e VERSION="$VERSION" -e OUTPUT_DIR="$OUTPUT_DIR" \
+			-e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+			alpine:edge ./scripts/build-apk.sh "$PKG"
 	else
 		echo "Error: apk mkpkg or docker is required to build OpenWrt APKv3 packages." >&2
 		exit 1
@@ -83,3 +86,9 @@ apk mkndx --allow-untrusted --output "${OUTPUT_DIR}/packages.adb" "$REPO_FILE"
 
 echo "Package and repository index successfully generated:"
 ls -lh "${OUTPUT_DIR}"
+
+# The container runs as root so apk records root-owned payload files; hand the
+# build output back to the invoking user so later host-side steps can write to it.
+if [ -n "${HOST_UID:-}" ]; then
+	chown -R "${HOST_UID}:${HOST_GID:-$HOST_UID}" "$OUTPUT_DIR"
+fi
