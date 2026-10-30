@@ -396,31 +396,52 @@ return view.extend({
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isScheduleActive
-					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#007bff;color:#fff;border:1px solid #007bff;cursor:default;'
-					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, [
-				E('span', { 'style': 'margin-right:4px;' }, isScheduleActive ? '✓' : '⏰'),
-				_('Enforce Schedule')
-			]);
+					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#007bff;color:#fff;border:1px solid #007bff;cursor:default;'
+					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
+			}, _('Enforce Schedule'));
 			if (!isScheduleActive) {
 				btnSchedule.addEventListener('click', function() { runAction('schedule', btnSchedule); });
 			}
 
-			// Button: Unlock All
+			// Button: Permanent Unlock All
 			const isUnlocked = (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled');
 			const btnUnlock = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isUnlocked
-					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid #28a745;cursor:default;'
-					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, [
-				E('span', { 'style': 'margin-right:4px;' }, isUnlocked ? '✓' : '🔓'),
-				_('Unlock All')
-			]);
+					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid #28a745;cursor:default;'
+					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
+			}, _('Unlock All'));
 			if (!isUnlocked) {
 				btnUnlock.addEventListener('click', function() { runAction('unlocked', btnUnlock); });
 			}
+
+			// Temporary Unlock Group: Button + Duration Dropdown
+			const durSelect = E('select', {
+				'class': 'cbi-input-select',
+				'style': 'padding:5px 8px;font-size:12px;border-radius:4px 0 0 4px;margin:0;border-right:none;'
+			}, [
+				E('option', { 'value': '15' }, '15m'),
+				E('option', { 'value': '30', 'selected': '' }, '30m'),
+				E('option', { 'value': '45' }, '45m'),
+				E('option', { 'value': '60' }, '1 hr'),
+				E('option', { 'value': '90' }, '1.5 hr'),
+				E('option', { 'value': '120' }, '2 hr'),
+				E('option', { 'value': '180' }, '3 hr')
+			]);
+
+			const btnTempUnlock = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': 'padding:6px 12px;font-size:12px;font-weight:600;border-radius:0 4px 4px 0;margin:0;cursor:pointer;'
+			}, _('Unlock For'));
+			btnTempUnlock.addEventListener('click', function() {
+				runBonus(parseInt(durSelect.value, 10), btnTempUnlock);
+			});
+
+			const tempUnlockGroup = E('div', {
+				'style': 'display:inline-flex;align-items:center;'
+			}, [durSelect, btnTempUnlock]);
 
 			// Button: Emergency Lockdown
 			const isBlocked = (isEnabled && currentMode === 'block');
@@ -428,26 +449,12 @@ return view.extend({
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isBlocked
-					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:default;'
-					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, [
-				E('span', { 'style': 'margin-right:4px;' }, isBlocked ? '✓' : '🛑'),
-				_('Lockdown')
-			]);
+					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:default;'
+					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
+			}, _('Lockdown'));
 			if (!isBlocked) {
 				btnBlock.addEventListener('click', function() { runAction('block', btnBlock); });
 			}
-
-			// Button: +30 Min Bonus
-			const btnBonus30 = E('button', {
-				'type': 'button',
-				'class': 'cbi-button',
-				'style': 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, [
-				E('span', { 'style': 'margin-right:4px;' }, '⏳'),
-				_('+30 Min')
-			]);
-			btnBonus30.addEventListener('click', function() { runBonus(30, btnBonus30); });
 
 			return E('div', {
 				'class': 'cbi-section',
@@ -460,8 +467,8 @@ return view.extend({
 				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					btnSchedule,
 					btnUnlock,
-					btnBlock,
-					btnBonus30
+					tempUnlockGroup,
+					btnBlock
 				])
 			]);
 		};
