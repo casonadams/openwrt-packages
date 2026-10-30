@@ -153,36 +153,53 @@ const TimePicker12h = form.Value.extend({
 	}
 });
 
-// StatusFlag: Checkbox with live updating subtle green/red active/inactive pill
-const StatusFlag = form.Flag.extend({
+// StatusFlag: Interactive pill button (Enabled/Disabled) matching the day button aesthetic
+const StatusFlag = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
-		const node = this.super('renderWidget', [section_id, option_index, cfgvalue]);
-		const isChecked = (cfgvalue !== '0' && cfgvalue !== false);
+		let isEnabled = (cfgvalue !== '0' && cfgvalue !== false && cfgvalue !== '');
 
-		const pill = E('span', {
-			'style': isChecked
-				? 'background:rgba(40,167,69,0.15);color:#28a745;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-left:6px;display:inline-block;'
-				: 'background:rgba(220,53,69,0.15);color:#e05260;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:600;margin-left:6px;display:inline-block;'
-		}, isChecked ? _('Active') : _('Inactive'));
+		const hiddenInput = E('input', {
+			'type': 'hidden',
+			'id': this.cbid(section_id),
+			'name': this.cbid(section_id),
+			'value': isEnabled ? '1' : '0'
+		});
 
-		const input = node.querySelector('input[type="checkbox"]');
-		if (input) {
-			input.addEventListener('change', function() {
-				if (this.checked) {
-					pill.style.background = 'rgba(40,167,69,0.15)';
-					pill.style.color = '#28a745';
-					pill.textContent = _('Active');
-				} else {
-					pill.style.background = 'rgba(220,53,69,0.15)';
-					pill.style.color = '#e05260';
-					pill.textContent = _('Inactive');
-				}
-			});
-		}
+		const btn = E('button', {
+			'type': 'button',
+			'class': 'cbi-button',
+			'style': isEnabled
+				? 'padding:3px 10px;font-size:11px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid transparent;cursor:pointer;min-width:68px;text-align:center;'
+				: 'padding:3px 10px;font-size:11px;font-weight:600;border-radius:4px;background:transparent;color:inherit;opacity:0.5;border:1px solid rgba(127,127,127,0.4);cursor:pointer;min-width:68px;text-align:center;'
+		}, isEnabled ? _('Enabled') : _('Disabled'));
+
+		btn.addEventListener('click', function(ev) {
+			ev.preventDefault();
+			isEnabled = !isEnabled;
+			hiddenInput.value = isEnabled ? '1' : '0';
+
+			if (isEnabled) {
+				btn.style.background = '#28a745';
+				btn.style.color = '#fff';
+				btn.style.opacity = '1';
+				btn.style.borderColor = 'transparent';
+				btn.style.fontWeight = '700';
+				btn.textContent = _('Enabled');
+			} else {
+				btn.style.background = 'transparent';
+				btn.style.color = 'inherit';
+				btn.style.opacity = '0.5';
+				btn.style.borderColor = 'rgba(127,127,127,0.4)';
+				btn.style.fontWeight = '600';
+				btn.textContent = _('Disabled');
+			}
+
+			dom.dispatch(hiddenInput, 'widget-change');
+		});
 
 		return E('div', {
 			'style': 'display:inline-flex;align-items:center;'
-		}, [node, pill]);
+		}, [btn, hiddenInput]);
 	}
 });
 
