@@ -1,84 +1,73 @@
-name: Build OpenWrt Packages
+name: CI Build & Test
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  release:
-    types: [ "published" ]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: Package APK & IPK
+  lint-and-test:
+    name: Lint & Test
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create APK Archive
+      - name: ShellCheck Lint
         run: |
-          mkdir -p dist
-          PKG="luci-app-internet-schedule"
-          VERSION="1.0.0-r1"
+          shellcheck -s sh \
+            luci-app-screentime/root/usr/bin/screentime \
+            luci-app-screentime/root/etc/init.d/screentime \
+            luci-app-screentime/root/etc/uci-defaults/99_screentime \
+            install.sh \
+            scripts/build-apk.sh \
+            scripts/generate-pages.sh \
+            tests/test_engine.sh
 
-          # Assemble package staging directory
-          STAGING="build_staging"
-          rm -rf "$STAGING"
-          mkdir -p "$STAGING/etc/config" \
-                   "$STAGING/etc/init.d" \
-                   "$STAGING/etc/uci-defaults" \
-                   "$STAGING/usr/bin" \
-                   "$STAGING/usr/share/luci/menu.d" \
-                   "$STAGING/usr/share/rpcd/acl.d" \
-                   "$STAGING/www/luci-static/resources/view/internet-schedule"
+      - name: JavaScript & JSON Syntax Check
+        run: |
+          node --check luci-app-screentime/htdocs/luci-static/resources/view/screentime/overview.js
+          node -e '
+          const fs = require("fs");
+          const files = [
+            "luci-app-screentime/root/usr/share/luci/menu.d/luci-app-screentime.json",
+            "luci-app-screentime/root/usr/share/rpcd/acl.d/luci-app-screentime.json",
+            "release-please-config.json",
+            ".release-please-manifest.json"
+          ];
+          for (const file of files) {
+            JSON.parse(fs.readFileSync(file, "utf8"));
+          }
+          console.log("All JSON files valid.");
+          '
 
-          # Copy files from repository
-          cp -r "$PKG/root/etc/config/"* "$STAGING/etc/config/"
-          cp -r "$PKG/root/etc/init.d/"* "$STAGING/etc/init.d/"
-          cp -r "$PKG/root/etc/uci-defaults/"* "$STAGING/etc/uci-defaults/"
-          cp -r "$PKG/root/usr/bin/"* "$STAGING/usr/bin/"
-          cp -r "$PKG/root/usr/share/luci/menu.d/"* "$STAGING/usr/share/luci/menu.d/"
-          cp -r "$PKG/root/usr/share/rpcd/acl.d/"* "$STAGING/usr/share/rpcd/acl.d/"
-          cp -r "$PKG/htdocs/luci-static/resources/view/internet-schedule/"* "$STAGING/www/luci-static/resources/view/internet-schedule/"
+      - name: Run Engine Test Suite
+        run: |
+          chmod +x tests/test_engine.sh
+          ./tests/test_engine.sh
 
-          chmod +x "$STAGING/etc/init.d/internet-schedule" \
-                   "$STAGING/etc/uci-defaults/99_internet-schedule" \
-                   "$STAGING/usr/bin/internet-schedule"
+  build:
+    name: Build APK Packages
+    needs: lint-and-test
+    runs-on: ubuntu-latest
 
-          # Create .PKGINFO metadata
-          cat << EOF > "$STAGING/.PKGINFO"
-          pkgname = ${PKG}
-          pkgver = ${VERSION}
-          pkgdesc = LuCI Web UI and backend for Internet Access Scheduler & Parental Control
-          url = https://github.com/casonadams/openwrt-packages
-          builddate = $(date +%s)
-          packager = Cason Adams <https://github.com/casonadams>
-          size = $(du -sb "$STAGING" | awk '{print $1}')
-          arch = noarch
-          license = Apache-2.0
-          depend = conntrack
-          depend = libc
-          depend = luci-base
-          EOF
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Package APK (tar archive)
-          tar -czf "dist/${PKG}_${VERSION}_all.apk" -C "$STAGING" .
-          echo "Generated dist/${PKG}_${VERSION}_all.apk"
+      - name: Build APKv3 Packages
+        run: |
+          chmod +x scripts/build-apk.sh
+          ./scripts/build-apk.sh
 
-      - name: Upload Artifact
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-internet-schedule-apk
+          name: openwrt-packages-apk
           path: dist/*.apk
-
-      - name: Attach APK to GitHub Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.apk

@@ -1,0 +1,4 @@
+dist/
+build_staging/
+*.apk
+*.ipk

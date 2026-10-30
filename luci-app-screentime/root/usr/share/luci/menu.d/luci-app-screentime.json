@@ -1,0 +1,15 @@
+{
+	"admin/services/screentime": {
+		"title": "Screen Time",
+		"order": 85,
+		"action": {
+			"type": "view",
+			"path": "screentime/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-screentime"
+			]
+		}
+	}
+}

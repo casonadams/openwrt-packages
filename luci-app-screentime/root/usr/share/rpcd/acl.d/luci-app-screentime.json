@@ -1,6 +1,6 @@
 {
-	"luci-app-internet-schedule": {
-		"description": "Grant UCI, ubus, and service access for Internet Schedule",
+	"luci-app-screentime": {
+		"description": "Grant UCI, ubus, and service access for Screen Time",
 		"read": {
 			"ubus": {
 				"luci-rpc": [
@@ -15,17 +15,28 @@
 				]
 			},
 			"uci": [
-				"internet_schedule",
+				"screentime",
 				"system",
 				"firewall"
 			]
 		},
 		"write": {
 			"uci": [
-				"internet_schedule",
+				"screentime",
 				"firewall"
 			],
 			"ubus": {
+				"uci": [
+					"add",
+					"set",
+					"delete",
+					"order",
+					"rename",
+					"apply",
+					"confirm",
+					"commit",
+					"revert"
+				],
 				"service": [
 					"start",
 					"stop",
@@ -34,7 +45,7 @@
 				]
 			},
 			"file": {
-				"/usr/bin/internet-schedule": [
+				"/usr/bin/screentime": [
 					"exec"
 				]
 			}

@@ -1,11 +1,11 @@
 include $(TOPDIR)/rules.mk
 
-LUCI_TITLE:=LuCI support for Internet Access Scheduler & Parental Control
+LUCI_TITLE:=LuCI support for Screen Time & Parental Controls
 LUCI_DEPENDS:=+conntrack
 LUCI_PKGARCH:=all
 
-PKG_NAME:=luci-app-internet-schedule
-PKG_VERSION:=1.0.0
+PKG_NAME:=luci-app-screentime
+PKG_VERSION:=1.0.0 # x-release-please-version
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=Cason Adams <https://github.com/casonadams>

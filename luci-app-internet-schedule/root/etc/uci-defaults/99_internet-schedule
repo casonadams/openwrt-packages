@@ -1,4 +1,0 @@
-#!/bin/sh
-/etc/init.d/internet-schedule enable
-/etc/init.d/internet-schedule start
-exit 0
