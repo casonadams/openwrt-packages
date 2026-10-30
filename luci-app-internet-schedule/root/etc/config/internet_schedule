@@ -1,0 +1,6 @@
+config settings 'settings'
+	option enabled '1'
+	option start_time '18:00:00'
+	option stop_time '19:30:00'
+	option weekdays 'all'
+	option mode 'schedule'
