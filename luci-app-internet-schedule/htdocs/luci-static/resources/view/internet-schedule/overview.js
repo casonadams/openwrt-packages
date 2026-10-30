@@ -85,6 +85,17 @@ function calcCutoffLabel(start24, durationMins) {
 
 // 12-Hour Dropdown Time Picker
 const TimePicker12h = form.Value.extend({
+	default: '18:00:00',
+
+	formvalue: function(section_id) {
+		const node = this.map.findElement('id', this.cbid(section_id));
+		if (node) {
+			return node.value;
+		}
+		const cfg = this.cfgvalue(section_id);
+		return (cfg != null && cfg !== '') ? cfg : this.default;
+	},
+
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		const parsed = parse24to12(cfgvalue);
 
@@ -155,8 +166,16 @@ const TimePicker12h = form.Value.extend({
 
 // Interactive Pill Button (Enabled/Disabled)
 const StatusFlag = form.Value.extend({
-	rmempty: false,
 	default: '1',
+
+	formvalue: function(section_id) {
+		const node = this.map.findElement('id', this.cbid(section_id));
+		if (node) {
+			return node.value;
+		}
+		const cfg = this.cfgvalue(section_id);
+		return (cfg != null && cfg !== '') ? cfg : this.default;
+	},
 
 	validate: function(section_id, value) {
 		return true;
@@ -212,6 +231,17 @@ const StatusFlag = form.Value.extend({
 
 // Compact Day Picker Component (M T W T F S S)
 const CompactDayPicker = form.Value.extend({
+	default: 'all',
+
+	formvalue: function(section_id) {
+		const node = this.map.findElement('id', this.cbid(section_id));
+		if (node) {
+			return node.value;
+		}
+		const cfg = this.cfgvalue(section_id);
+		return (cfg != null && cfg !== '') ? cfg : this.default;
+	},
+
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		let selectedDays = [];
 		if (Array.isArray(cfgvalue)) {
