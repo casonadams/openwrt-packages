@@ -362,6 +362,7 @@ return view.extend({
 			// Action Button:
 			// Red when "Bypass Until Next Window" (invoking a bypass)
 			// Blue when "Resume Schedule" (returning to normal schedule enforcement)
+			// Styled with 4px border-radius to match the Enabled/Disabled and Save & Apply buttons
 			const actionBtn = E('button', {
 				'type': 'button',
 				'class': 'cbi-button'
@@ -369,19 +370,19 @@ return view.extend({
 
 			if (overrideMode !== 'none') {
 				actionBtn.textContent = _('Resume Schedule');
-				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;';
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:4px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('clear-override', actionBtn);
 				});
 			} else if (currentStatus === 'downtime') {
 				actionBtn.textContent = _('Bypass Until Next Window');
-				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('ignore-downtime', actionBtn);
 				});
 			} else {
 				actionBtn.textContent = _('Block Until Next Window');
-				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:14px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
+				actionBtn.style.cssText = 'padding:4px 12px;font-size:11px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;';
 				actionBtn.addEventListener('click', function() {
 					runAction('turn-on-downtime', actionBtn);
 				});
