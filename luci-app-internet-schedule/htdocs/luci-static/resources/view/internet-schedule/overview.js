@@ -335,34 +335,30 @@ return view.extend({
 			};
 
 			// Status badge
+			// Green = Normal Schedule is actively being enforced (whether currently in open or blocked window)
+			// Red / Amber = Schedule is overridden / bypassed (rules paused or blocked manually)
 			let statusBadge;
 			if (overrideMode === 'ignore_downtime') {
 				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
+					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Paused Until Next Window')
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
+					_('Schedule Bypassed (Paused Until Next Window)')
 				]);
 			} else if (overrideMode === 'forced_downtime') {
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
-					_('Blocked Until Next Window')
+					_('Schedule Bypassed (Blocked Until Next Window)')
 				]);
-			} else if (currentStatus === 'allowed') {
+			} else {
+				const windowState = (currentStatus === 'allowed') ? _('Open') : _('Curfew');
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Schedule Active (Open)')
-				]);
-			} else {
-				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(108,117,125,0.15);color:#6c757d;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
-				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#6c757d;margin-right:6px;' }),
-					_('Schedule Active (Blocked)')
+					_('Schedule Enforced (%s)').format(windowState)
 				]);
 			}
 
