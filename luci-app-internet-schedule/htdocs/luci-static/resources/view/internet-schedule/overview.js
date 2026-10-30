@@ -290,15 +290,18 @@ return view.extend({
 			uci.load('system'),
 			callHostHints(),
 			callSystemInfo(),
-			callExec('/usr/bin/internet-schedule', ['get-override'])
+			callExec('/usr/bin/internet-schedule', ['get-state'])
 		]);
 	},
 
 	render: function(data) {
 		const hostHints = data[2] || {};
 		const sysInfo = data[3] || {};
-		const overrideStatus = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'inactive';
-		const isIgnoredToday = (overrideStatus === 'active');
+		const stateRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'downtime|none';
+
+		const stateParts = stateRaw.split('|');
+		const currentStatus = stateParts[0] || 'downtime'; // 'downtime' or 'allowed'
+		const overrideMode = stateParts[1] || 'none';     // 'none', 'ignore_downtime', or 'forced_downtime'
 
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
 		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
@@ -313,7 +316,7 @@ return view.extend({
 
 		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
-		// 1. Apple-Style "Ignore Schedule for Today" Header Bar
+		// 1. Apple Screen Time Header Control Bar
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const runAction = function(cmd, el) {
@@ -333,47 +336,60 @@ return view.extend({
 
 			// Status badge
 			let statusBadge;
-			if (isIgnoredToday) {
+			if (currentStatus === 'downtime') {
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
+					_('Downtime Active')
+				]);
+			} else {
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Ignored for Today (Resumes Tomorrow)')
-				]);
-			} else {
-				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(0,123,255,0.12);color:#007bff;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
-				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#007bff;margin-right:6px;' }),
-					_('Schedule Active')
+					_('Internet Allowed')
 				]);
 			}
 
-			// Clock pill
+			// Clean Router Clock
 			const clockBadge = E('div', {
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Apple-style single action button
-			let actionBtn;
-			if (isIgnoredToday) {
-				actionBtn = E('button', {
-					'type': 'button',
-					'class': 'cbi-button',
-					'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
-				}, _('Resume Schedule'));
-				actionBtn.addEventListener('click', function() {
-					runAction('resume-schedule', actionBtn);
-				});
+			// Apple Action Button:
+			// If in Downtime -> "Ignore Downtime Until Schedule"
+			// If Internet Allowed -> "Turn On Downtime Until Schedule"
+			const actionBtn = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
+			});
+
+			if (currentStatus === 'downtime') {
+				if (overrideMode === 'forced_downtime') {
+					actionBtn.textContent = _('Cancel Downtime');
+					actionBtn.addEventListener('click', function() {
+						runAction('clear-override', actionBtn);
+					});
+				} else {
+					actionBtn.textContent = _('Ignore Downtime Until Schedule');
+					actionBtn.addEventListener('click', function() {
+						runAction('ignore-downtime', actionBtn);
+					});
+				}
 			} else {
-				actionBtn = E('button', {
-					'type': 'button',
-					'class': 'cbi-button',
-					'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
-				}, _('Ignore for Today'));
-				actionBtn.addEventListener('click', function() {
-					runAction('ignore-today', actionBtn);
-				});
+				if (overrideMode === 'ignore_downtime') {
+					actionBtn.textContent = _('Turn On Downtime');
+					actionBtn.addEventListener('click', function() {
+						runAction('clear-override', actionBtn);
+					});
+				} else {
+					actionBtn.textContent = _('Turn On Downtime Until Schedule');
+					actionBtn.addEventListener('click', function() {
+						runAction('turn-on-downtime', actionBtn);
+					});
+				}
 			}
 
 			return E('div', {
