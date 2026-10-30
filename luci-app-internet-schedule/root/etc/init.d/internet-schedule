@@ -1,16 +1,15 @@
 #!/bin/sh /etc/rc.common
 # /etc/init.d/internet-schedule
-# OpenWrt procd service for Internet Access Scheduler
+# OpenWrt service for Internet Access Scheduler
 
 START=95
 STOP=10
-USE_PROCD=1
 
-start_service() {
+start() {
 	/usr/bin/internet-schedule sync
 }
 
-stop_service() {
+stop() {
 	uci -q delete firewall.kids_schedule_allow
 	uci -q delete firewall.kids_schedule_block
 	uci commit firewall
@@ -19,10 +18,10 @@ stop_service() {
 	/etc/init.d/cron restart >/dev/null 2>&1
 }
 
-reload_service() {
+restart() {
 	/usr/bin/internet-schedule sync
 }
 
-service_triggers() {
-	procd_add_reload_trigger "internet_schedule"
+reload() {
+	/usr/bin/internet-schedule sync
 }

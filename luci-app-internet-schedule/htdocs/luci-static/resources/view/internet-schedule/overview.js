@@ -290,19 +290,15 @@ return view.extend({
 			uci.load('system'),
 			callHostHints(),
 			callSystemInfo(),
-			callExec('/usr/bin/internet-schedule', ['get-bonus'])
+			callExec('/usr/bin/internet-schedule', ['get-override'])
 		]);
 	},
 
 	render: function(data) {
 		const hostHints = data[2] || {};
 		const sysInfo = data[3] || {};
-		const bonusRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'inactive|0|';
-
-		const bonusParts = bonusRaw.split('|');
-		const isBonusActive = (bonusParts[0] === 'active');
-		const bonusRemMins = parseInt(bonusParts[1], 10) || 0;
-		const bonusEndTime = bonusParts[2] || '';
+		const overrideStatus = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'inactive';
+		const isIgnoredToday = (overrideStatus === 'active');
 
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
 		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
@@ -317,34 +313,19 @@ return view.extend({
 
 		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
-		// 1. Mobile-First Pill Bar: Status + Clock + Touch-Friendly Bonus Pills
+		// 1. Apple-Style "Ignore Schedule for Today" Header Bar
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
-			const runBonusAdd = function(mins, el) {
+			const runAction = function(cmd, el) {
 				el.disabled = true;
-				ui.showIndicator('bonus-op', _('Adding bonus time...'));
-				callExec('/usr/bin/internet-schedule', ['bonus-add', String(mins)])
+				ui.showIndicator('override-op', _('Updating...'));
+				callExec('/usr/bin/internet-schedule', [cmd])
 					.then(function() {
-						ui.hideIndicator('bonus-op');
+						ui.hideIndicator('override-op');
 						window.location.reload();
 					})
 					.catch(function(err) {
-						ui.hideIndicator('bonus-op');
-						el.disabled = false;
-						ui.addNotification(null, E('p', {}, err.message || err));
-					});
-			};
-
-			const runBonusClear = function(el) {
-				el.disabled = true;
-				ui.showIndicator('bonus-op', _('Ending bonus time...'));
-				callExec('/usr/bin/internet-schedule', ['bonus-clear'])
-					.then(function() {
-						ui.hideIndicator('bonus-op');
-						window.location.reload();
-					})
-					.catch(function(err) {
-						ui.hideIndicator('bonus-op');
+						ui.hideIndicator('override-op');
 						el.disabled = false;
 						ui.addNotification(null, E('p', {}, err.message || err));
 					});
@@ -352,12 +333,12 @@ return view.extend({
 
 			// Status badge
 			let statusBadge;
-			if (isBonusActive) {
+			if (isIgnoredToday) {
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Bonus Active (%sm left · Ends %s)').format(bonusRemMins, bonusEndTime)
+					_('Ignored for Today (Resumes Tomorrow)')
 				]);
 			} else {
 				statusBadge = E('div', {
@@ -368,46 +349,38 @@ return view.extend({
 				]);
 			}
 
-			// Clean Router Wall-Clock
+			// Clock pill
 			const clockBadge = E('div', {
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Quick Bonus Action Pills (Touch-Friendly)
-			const bonusControls = E('div', {
-				'style': 'display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;'
-			});
-
-			const makePillBtn = function(label, mins, isDanger) {
-				const btn = E('button', {
+			// Apple-style single action button
+			let actionBtn;
+			if (isIgnoredToday) {
+				actionBtn = E('button', {
 					'type': 'button',
 					'class': 'cbi-button',
-					'style': isDanger
-						? 'padding:3px 10px;font-size:11px;font-weight:700;border-radius:12px;background:#dc3545;color:#fff;border:1px solid transparent;cursor:pointer;'
-						: 'padding:3px 10px;font-size:11px;font-weight:600;border-radius:12px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
-				}, label);
-
-				if (isDanger) {
-					btn.addEventListener('click', function() { runBonusClear(btn); });
-				} else {
-					btn.addEventListener('click', function() { runBonusAdd(mins, btn); });
-				}
-				return btn;
-			};
-
-			if (isBonusActive) {
-				bonusControls.appendChild(makePillBtn(_('End Bonus'), 0, true));
+					'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
+				}, _('Resume Schedule'));
+				actionBtn.addEventListener('click', function() {
+					runAction('resume-schedule', actionBtn);
+				});
+			} else {
+				actionBtn = E('button', {
+					'type': 'button',
+					'class': 'cbi-button',
+					'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
+				}, _('Ignore for Today'));
+				actionBtn.addEventListener('click', function() {
+					runAction('ignore-today', actionBtn);
+				});
 			}
-
-			bonusControls.appendChild(makePillBtn('+15m', 15, false));
-			bonusControls.appendChild(makePillBtn('+30m', 30, false));
-			bonusControls.appendChild(makePillBtn('+1h', 60, false));
 
 			return E('div', {
 				'class': 'cbi-section',
 				'style': 'margin-bottom:12px;padding:8px 12px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;'
 			}, [
-				bonusControls,
+				actionBtn,
 				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					statusBadge,
 					clockBadge
