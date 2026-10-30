@@ -145,7 +145,7 @@ const TimePicker12h = form.Value.extend({
 		const updateVal = function() {
 			const val24 = parse12to24(hourSelect.value, minSelect.value, ampmSelect.value);
 			hiddenInput.value = val24;
-			dom.dispatch(hiddenInput, 'widget-change');
+			dom.dispatch(hiddenInput, 'change');
 		};
 
 		hourSelect.addEventListener('change', updateVal);
@@ -220,7 +220,7 @@ const StatusFlag = form.Value.extend({
 				btn.textContent = _('Disabled');
 			}
 
-			dom.dispatch(hiddenInput, 'widget-change');
+			dom.dispatch(hiddenInput, 'change');
 		});
 
 		return E('div', {
@@ -309,7 +309,7 @@ const CompactDayPicker = form.Value.extend({
 				}
 
 				hiddenInput.value = (selectedDays.length === 7) ? 'all' : selectedDays.join(' ');
-				dom.dispatch(hiddenInput, 'widget-change');
+				dom.dispatch(hiddenInput, 'change');
 			});
 
 			container.appendChild(btn);
@@ -321,38 +321,10 @@ const CompactDayPicker = form.Value.extend({
 });
 
 return view.extend({
-	// Single "Save" button: instant commit & apply with zero staging or rollback modals
+	// No bottom buttons: seamless background auto-commit
 	handleSaveApply: null,
+	handleSave: null,
 	handleReset: null,
-
-	handleSave: function(ev) {
-		const self = this;
-		ui.showIndicator('save-op', _('Saving and applying changes...'));
-
-		const tasks = [];
-		document.getElementById('maincontent').querySelectorAll('.cbi-map').forEach(function(mapNode) {
-			const mapInst = dom.findClassInstance(mapNode);
-			if (mapInst && typeof(mapInst.save) === 'function') {
-				tasks.push(mapInst.save());
-			}
-		});
-
-		return Promise.all(tasks)
-			.then(function() {
-				return uci.commit('internet_schedule');
-			})
-			.then(function() {
-				return callExec('/usr/bin/internet-schedule', ['sync']);
-			})
-			.then(function() {
-				ui.hideIndicator('save-op');
-				window.location.reload();
-			})
-			.catch(function(err) {
-				ui.hideIndicator('save-op');
-				ui.addNotification(null, E('p', {}, err.message || err), 'danger');
-			});
-	},
 
 	load: function() {
 		return Promise.all([
@@ -386,19 +358,23 @@ return view.extend({
 
 		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
-		// 1. Natural Header Control Bar: "Bypass Until Next Window" / "Resume Schedule"
+		// 1. Header Control Bar with subtle Google Docs style Auto-Save Pill
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const runAction = function(cmd, el) {
 				el.disabled = true;
-				ui.showIndicator('override-op', _('Updating...'));
+				saveIndicator.textContent = _('Updating...');
+				saveIndicator.style.display = 'inline-flex';
+				saveIndicator.style.color = '#007bff';
 				callExec('/usr/bin/internet-schedule', [cmd])
 					.then(function() {
-						ui.hideIndicator('override-op');
+						saveIndicator.textContent = _('Saved ✓');
+						saveIndicator.style.color = '#28a745';
 						window.location.reload();
 					})
 					.catch(function(err) {
-						ui.hideIndicator('override-op');
+						saveIndicator.textContent = _('Error');
+						saveIndicator.style.color = '#dc3545';
 						el.disabled = false;
 						ui.addNotification(null, E('p', {}, err.message || err));
 					});
@@ -427,7 +403,13 @@ return view.extend({
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Action Button
+			// Auto-Save status indicator pill (in header)
+			const saveIndicator = E('div', {
+				'id': 'auto-save-indicator',
+				'style': 'font-size:11px;font-weight:600;color:#28a745;display:none;align-items:center;padding:2px 8px;border-radius:10px;background:rgba(127,127,127,0.1);'
+			}, _('Saved ✓'));
+
+			// Action Button (Red / Blue)
 			const actionBtn = E('button', {
 				'type': 'button',
 				'class': 'cbi-button'
@@ -457,7 +439,10 @@ return view.extend({
 				'class': 'cbi-section',
 				'style': 'margin-bottom:12px;padding:8px 12px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;'
 			}, [
-				actionBtn,
+				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;' }, [
+					actionBtn,
+					saveIndicator
+				]),
 				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					statusBadge,
 					clockBadge
@@ -516,7 +501,7 @@ return view.extend({
 		o.placeholder = 'e.g. Roku Streambar Living Room';
 		o.rmempty = false;
 
-		// MAC Address picker populated with discovered devices (standardized width)
+		// MAC Address picker populated with discovered devices
 		o = s.option(form.Value, 'mac', _('MAC Address'));
 		o.placeholder = 'XX:XX:XX:XX:XX:XX';
 		o.datatype = 'macaddr';
@@ -556,6 +541,61 @@ return view.extend({
 			o.value(mAddr, label);
 		}
 
-		return m.render();
+		// Render form and bind background auto-commit (no page reloads!)
+		return m.render().then(function(mapNode) {
+			let debounceTimer = null;
+			let isSaving = false;
+
+			const triggerAutoSave = function() {
+				if (debounceTimer) {
+					window.clearTimeout(debounceTimer);
+				}
+
+				const indicator = document.getElementById('auto-save-indicator');
+				if (indicator) {
+					indicator.textContent = _('Saving…');
+					indicator.style.display = 'inline-flex';
+					indicator.style.color = '#007bff';
+				}
+
+				debounceTimer = window.setTimeout(function() {
+					if (isSaving) return;
+					isSaving = true;
+
+					m.save()
+						.then(function() {
+							return uci.commit('internet_schedule');
+						})
+						.then(function() {
+							return callExec('/usr/bin/internet-schedule', ['sync']);
+						})
+						.then(function() {
+							isSaving = false;
+							if (indicator) {
+								indicator.textContent = _('Saved ✓');
+								indicator.style.color = '#28a745';
+								window.setTimeout(function() {
+									if (!isSaving && indicator.textContent === _('Saved ✓')) {
+										indicator.style.display = 'none';
+									}
+								}, 3000);
+							}
+						})
+						.catch(function(err) {
+							isSaving = false;
+							if (indicator) {
+								indicator.textContent = _('Save Error');
+								indicator.style.color = '#dc3545';
+							}
+						});
+				}, 1200); // 1.2s debounce
+			};
+
+			// Listen for any change or input on the rendered form
+			mapNode.addEventListener('change', triggerAutoSave);
+			mapNode.addEventListener('input', triggerAutoSave);
+
+			return mapNode;
+		});
 	}
 });
