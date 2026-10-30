@@ -179,6 +179,86 @@ const StatusFlag = form.Flag.extend({
 	}
 });
 
+// Compact Day Picker Component (M T W T F S S pill buttons)
+const CompactDayPicker = form.Value.extend({
+	renderWidget: function(section_id, option_index, cfgvalue) {
+		let selectedDays = [];
+		if (Array.isArray(cfgvalue)) {
+			selectedDays = cfgvalue.slice();
+		} else if (typeof cfgvalue === 'string' && cfgvalue.trim() !== '') {
+			selectedDays = cfgvalue.trim().split(/\s+/);
+		}
+		if (selectedDays.length === 0 || selectedDays.indexOf('all') !== -1) {
+			selectedDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+		}
+
+		const days = [
+			{ id: 'Mon', label: 'M', title: _('Monday') },
+			{ id: 'Tue', label: 'T', title: _('Tuesday') },
+			{ id: 'Wed', label: 'W', title: _('Wednesday') },
+			{ id: 'Thu', label: 'T', title: _('Thursday') },
+			{ id: 'Fri', label: 'F', title: _('Friday') },
+			{ id: 'Sat', label: 'S', title: _('Saturday') },
+			{ id: 'Sun', label: 'S', title: _('Sunday') }
+		];
+
+		const hiddenInput = E('input', {
+			'type': 'hidden',
+			'id': this.cbid(section_id),
+			'name': this.cbid(section_id),
+			'value': (selectedDays.length === 7) ? 'all' : selectedDays.join(' ')
+		});
+
+		const container = E('div', {
+			'class': 'compact-day-picker',
+			'style': 'display:inline-flex;gap:3px;align-items:center;min-width:180px;'
+		});
+
+		days.forEach(function(d) {
+			let active = (selectedDays.indexOf(d.id) !== -1);
+			const btn = E('button', {
+				'type': 'button',
+				'title': d.title,
+				'class': 'cbi-button',
+				'style': active
+					? 'min-width:22px;height:24px;padding:0 3px;font-size:11px;font-weight:700;line-height:22px;border-radius:3px;background:#007bff;color:#fff;border:1px solid transparent;cursor:pointer;'
+					: 'min-width:22px;height:24px;padding:0 3px;font-size:11px;font-weight:600;line-height:22px;border-radius:3px;background:transparent;opacity:0.45;border:1px solid rgba(127,127,127,0.4);cursor:pointer;'
+			}, d.label);
+
+			btn.addEventListener('click', function(ev) {
+				ev.preventDefault();
+				active = !active;
+				const idx = selectedDays.indexOf(d.id);
+				if (active && idx === -1) {
+					selectedDays.push(d.id);
+				} else if (!active && idx !== -1) {
+					selectedDays.splice(idx, 1);
+				}
+
+				if (active) {
+					btn.style.background = '#007bff';
+					btn.style.color = '#fff';
+					btn.style.opacity = '1';
+					btn.style.borderColor = 'transparent';
+				} else {
+					btn.style.background = 'transparent';
+					btn.style.color = 'inherit';
+					btn.style.opacity = '0.45';
+					btn.style.borderColor = 'rgba(127,127,127,0.4)';
+				}
+
+				hiddenInput.value = (selectedDays.length === 7) ? 'all' : selectedDays.join(' ');
+				dom.dispatch(hiddenInput, 'widget-change');
+			});
+
+			container.appendChild(btn);
+		});
+
+		container.appendChild(hiddenInput);
+		return container;
+	}
+});
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -329,16 +409,8 @@ return view.extend({
 		o.default = 'Schedule A';
 		o.rmempty = false;
 
-		// Active Days
-		o = s.option(form.MultiValue, 'weekdays', _('Active Days'));
-		o.value('all', _('Everyday'));
-		o.value('Mon', _('Mon'));
-		o.value('Tue', _('Tue'));
-		o.value('Wed', _('Wed'));
-		o.value('Thu', _('Thu'));
-		o.value('Fri', _('Fri'));
-		o.value('Sat', _('Sat'));
-		o.value('Sun', _('Sun'));
+		// Compact Day Picker (M T W T F S S)
+		o = s.option(CompactDayPicker, 'weekdays', _('Active Days'));
 		o.default = 'all';
 
 		// Start Time (12-Hour Dropdowns)
