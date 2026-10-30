@@ -315,8 +315,7 @@ return view.extend({
 
 		let m, s, o;
 
-		m = new form.Map('internet_schedule', _('Internet Schedule'),
-			_('Curfew and screen time access control for kids, smart TVs, and streaming devices.'));
+		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
 		// 1. Mobile-First Pill Bar: Status + Clock + Touch-Friendly Bonus Pills
 		s = m.section(form.NamedSection, 'settings', 'settings');
