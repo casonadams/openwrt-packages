@@ -1,0 +1,38 @@
+{
+	"luci-app-internet-schedule": {
+		"description": "Grant UCI, ubus, and service access for Internet Schedule",
+		"read": {
+			"ubus": {
+				"luci-rpc": [
+					"getHostHints",
+					"getDHCPLeases"
+				],
+				"service": [
+					"list"
+				],
+				"system": [
+					"info"
+				]
+			},
+			"uci": [
+				"internet_schedule",
+				"system",
+				"firewall"
+			]
+		},
+		"write": {
+			"uci": [
+				"internet_schedule",
+				"firewall"
+			],
+			"ubus": {
+				"service": [
+					"start",
+					"stop",
+					"restart",
+					"reload"
+				]
+			}
+		}
+	}
+}

@@ -1,0 +1,84 @@
+name: Build OpenWrt Packages
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [ "published" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Package APK & IPK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create APK Archive
+        run: |
+          mkdir -p dist
+          PKG="luci-app-internet-schedule"
+          VERSION="1.0.0-r1"
+
+          # Assemble package staging directory
+          STAGING="build_staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING/etc/config" \
+                   "$STAGING/etc/init.d" \
+                   "$STAGING/etc/uci-defaults" \
+                   "$STAGING/usr/bin" \
+                   "$STAGING/usr/share/luci/menu.d" \
+                   "$STAGING/usr/share/rpcd/acl.d" \
+                   "$STAGING/www/luci-static/resources/view/internet-schedule"
+
+          # Copy files from repository
+          cp -r "$PKG/root/etc/config/"* "$STAGING/etc/config/"
+          cp -r "$PKG/root/etc/init.d/"* "$STAGING/etc/init.d/"
+          cp -r "$PKG/root/etc/uci-defaults/"* "$STAGING/etc/uci-defaults/"
+          cp -r "$PKG/root/usr/bin/"* "$STAGING/usr/bin/"
+          cp -r "$PKG/root/usr/share/luci/menu.d/"* "$STAGING/usr/share/luci/menu.d/"
+          cp -r "$PKG/root/usr/share/rpcd/acl.d/"* "$STAGING/usr/share/rpcd/acl.d/"
+          cp -r "$PKG/htdocs/luci-static/resources/view/internet-schedule/"* "$STAGING/www/luci-static/resources/view/internet-schedule/"
+
+          chmod +x "$STAGING/etc/init.d/internet-schedule" \
+                   "$STAGING/etc/uci-defaults/99_internet-schedule" \
+                   "$STAGING/usr/bin/internet-schedule"
+
+          # Create .PKGINFO metadata
+          cat << EOF > "$STAGING/.PKGINFO"
+          pkgname = ${PKG}
+          pkgver = ${VERSION}
+          pkgdesc = LuCI Web UI and backend for Internet Access Scheduler & Parental Control
+          url = https://github.com/casonadams/openwrt-packages
+          builddate = $(date +%s)
+          packager = Cason Adams <https://github.com/casonadams>
+          size = $(du -sb "$STAGING" | awk '{print $1}')
+          arch = noarch
+          license = Apache-2.0
+          depend = conntrack
+          depend = libc
+          depend = luci-base
+          EOF
+
+          # Package APK (tar archive)
+          tar -czf "dist/${PKG}_${VERSION}_all.apk" -C "$STAGING" .
+          echo "Generated dist/${PKG}_${VERSION}_all.apk"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-internet-schedule-apk
+          path: dist/*.apk
+
+      - name: Attach APK to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk

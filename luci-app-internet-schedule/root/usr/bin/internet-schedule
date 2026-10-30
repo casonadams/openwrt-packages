@@ -1,0 +1,387 @@
+#!/bin/sh
+# /usr/bin/internet-schedule
+# Backend engine for luci-app-internet-schedule
+# Synchronizes UCI configuration with firewall4 (nftables) & conntrack
+
+CRON_FILE="/etc/crontabs/root"
+
+parse_time() {
+	raw=$(echo "$1" | tr 'A-Z' 'a-z' | tr -d ' ')
+	is_pm=0; is_am=0
+	case "$raw" in
+		*pm) is_pm=1; raw=${raw%pm} ;;
+		*am) is_am=1; raw=${raw%am} ;;
+	esac
+	h=$(echo "$raw" | cut -d: -f1)
+	m=$(echo "$raw" | cut -d: -f2 -s)
+	s=$(echo "$raw" | cut -d: -f3 -s)
+	[ -z "$m" ] && m=0
+	[ -z "$s" ] && s=0
+	if [ "$is_pm" -eq 1 ] && [ "$h" -lt 12 ]; then
+		h=$((h + 12))
+	elif [ "$is_am" -eq 1 ] && [ "$h" -eq 12 ]; then
+		h=0
+	fi
+	printf "%02d:%02d:%02d" "$h" "$m" "$s"
+}
+
+init_config() {
+	if [ ! -f /etc/config/internet_schedule ]; then
+		touch /etc/config/internet_schedule
+		uci set internet_schedule.settings=settings
+		uci set internet_schedule.settings.enabled='1'
+		uci set internet_schedule.settings.start_time='18:00:00'
+		uci set internet_schedule.settings.stop_time='19:30:00'
+		uci set internet_schedule.settings.weekdays='all'
+		uci set internet_schedule.settings.mode='schedule'
+		uci commit internet_schedule
+	fi
+}
+
+load_config() {
+	init_config
+	CFG_ENABLED=$(uci -q get internet_schedule.settings.enabled || echo "1")
+	CFG_START=$(uci -q get internet_schedule.settings.start_time || echo "18:00:00")
+	CFG_STOP=$(uci -q get internet_schedule.settings.stop_time || echo "19:30:00")
+	CFG_DAYS=$(uci -q get internet_schedule.settings.weekdays || echo "all")
+	CFG_MODE=$(uci -q get internet_schedule.settings.mode || echo "schedule")
+
+	CFG_START=$(parse_time "$CFG_START")
+	CFG_STOP=$(parse_time "$CFG_STOP")
+}
+
+get_devices() {
+	init_config
+	uci show internet_schedule 2>/dev/null | grep -E "=device$" | while read -r line; do
+		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+		name=$(uci -q get internet_schedule."$sec".name || echo "Unnamed Device")
+		mac=$(uci -q get internet_schedule."$sec".mac | tr 'A-F' 'a-f')
+		if [ -n "$mac" ] && echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+			echo "$name|$mac"
+		fi
+	done
+}
+
+get_ip_for_mac() {
+	target_mac=$(echo "$1" | tr 'A-F' 'a-f')
+	ip=$(awk -v mac="$target_mac" '$2 == mac {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
+	if [ -z "$ip" ]; then
+		ip=$(ip -4 neigh 2>/dev/null | awk -v mac="$target_mac" '$5 == mac {print $1; exit}')
+	fi
+	echo "$ip"
+}
+
+flush_flows() {
+	get_devices | while IFS='|' read -r name mac; do
+		ip=$(get_ip_for_mac "$mac")
+		if [ -n "$ip" ] && command -v conntrack >/dev/null 2>&1; then
+			conntrack -D -s "$ip" >/dev/null 2>&1
+			conntrack -D -d "$ip" >/dev/null 2>&1
+		fi
+	done
+}
+
+update_cron() {
+	load_config
+	mkdir -p /etc/crontabs
+	touch "$CRON_FILE"
+	sed -i '/internet-schedule/d' "$CRON_FILE"
+
+	if [ "$CFG_ENABLED" = "1" ] && [ "$CFG_MODE" = "schedule" ]; then
+		stop_h=$(echo "$CFG_STOP" | cut -d: -f1 | sed 's/^0*//')
+		stop_m=$(echo "$CFG_STOP" | cut -d: -f2 | sed 's/^0*//')
+		[ -z "$stop_h" ] && stop_h=0
+		[ -z "$stop_m" ] && stop_m=0
+		echo "$stop_m $stop_h * * * /usr/bin/internet-schedule flush-flows >/dev/null 2>&1" >> "$CRON_FILE"
+	fi
+
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+
+is_within_schedule() {
+	load_config
+	now_h=$(date +%H | sed 's/^0//'); [ -z "$now_h" ] && now_h=0
+	now_m=$(date +%M | sed 's/^0//'); [ -z "$now_m" ] && now_m=0
+	now_s=$(date +%S | sed 's/^0//'); [ -z "$now_s" ] && now_s=0
+	now_sec=$((now_h * 3600 + now_m * 60 + now_s))
+
+	start_h=$(echo "$CFG_START" | cut -d: -f1 | sed 's/^0//'); [ -z "$start_h" ] && start_h=0
+	start_m=$(echo "$CFG_START" | cut -d: -f2 | sed 's/^0//'); [ -z "$start_m" ] && start_m=0
+	start_sec=$((start_h * 3600 + start_m * 60))
+
+	stop_h=$(echo "$CFG_STOP" | cut -d: -f1 | sed 's/^0//'); [ -z "$stop_h" ] && stop_h=0
+	stop_m=$(echo "$CFG_STOP" | cut -d: -f2 | sed 's/^0//'); [ -z "$stop_m" ] && stop_m=0
+	stop_sec=$((stop_h * 3600 + stop_m * 60))
+
+	if [ "$now_sec" -ge "$start_sec" ] && [ "$now_sec" -lt "$stop_sec" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+sync_firewall() {
+	load_config
+
+	uci -q delete firewall.kids_schedule_allow
+	uci -q delete firewall.kids_schedule_block
+
+	dev_count=$(get_devices | wc -l)
+	if [ "$dev_count" -eq 0 ] || [ "$CFG_ENABLED" != "1" ] || [ "$CFG_MODE" = "unlocked" ] || [ "$CFG_MODE" = "disabled" ]; then
+		uci commit firewall
+		fw4 reload >/dev/null 2>&1
+		update_cron
+		return
+	fi
+
+	case "$CFG_MODE" in
+		block)
+			uci set firewall.kids_schedule_block=rule
+			uci set firewall.kids_schedule_block.name='Kids_Internet_Block'
+			uci set firewall.kids_schedule_block.src='lan'
+			uci set firewall.kids_schedule_block.dest='wan'
+			uci set firewall.kids_schedule_block.target='REJECT'
+			get_devices | while IFS='|' read -r name mac; do
+				uci add_list firewall.kids_schedule_block.src_mac="$mac"
+			done
+			flush_flows
+			;;
+		schedule|*)
+			uci set firewall.kids_schedule_allow=rule
+			uci set firewall.kids_schedule_allow.name='Kids_Internet_Allow'
+			uci set firewall.kids_schedule_allow.src='lan'
+			uci set firewall.kids_schedule_allow.dest='wan'
+			uci set firewall.kids_schedule_allow.target='ACCEPT'
+			uci set firewall.kids_schedule_allow.start_time="$CFG_START"
+			uci set firewall.kids_schedule_allow.stop_time="$CFG_STOP"
+			[ "$CFG_DAYS" != "all" ] && [ -n "$CFG_DAYS" ] && uci set firewall.kids_schedule_allow.weekdays="$CFG_DAYS"
+
+			uci set firewall.kids_schedule_block=rule
+			uci set firewall.kids_schedule_block.name='Kids_Internet_Block'
+			uci set firewall.kids_schedule_block.src='lan'
+			uci set firewall.kids_schedule_block.dest='wan'
+			uci set firewall.kids_schedule_block.target='REJECT'
+
+			get_devices | while IFS='|' read -r name mac; do
+				uci add_list firewall.kids_schedule_allow.src_mac="$mac"
+				uci add_list firewall.kids_schedule_block.src_mac="$mac"
+			done
+			;;
+	esac
+
+	uci commit firewall
+	fw4 reload >/dev/null 2>&1
+	update_cron
+}
+
+cmd_status() {
+	load_config
+	zonename=$(uci -q get system.@system[0].zonename || echo "UTC")
+	echo "=========================================================="
+	echo "              OpenWrt Internet Access Status              "
+	echo "=========================================================="
+	echo "Router Clock   : $(date '+%Y-%m-%d %H:%M:%S') ($zonename)"
+	echo "Allowed Window : $CFG_START to $CFG_STOP (Days: $CFG_DAYS)"
+
+	echo -n "Operating Mode : "
+	if [ "$CFG_ENABLED" != "1" ]; then
+		echo "DISABLED / OFF"
+	else
+		case "$CFG_MODE" in
+			unlocked|disabled) echo "UNLOCKED / UNRESTRICTED" ;;
+			block)             echo "LOCKED DOWN (Emergency Block)" ;;
+			schedule|*)
+				if is_within_schedule; then
+					echo "SCHEDULE ACTIVE: ALLOWED (Inside window)"
+				else
+					echo "SCHEDULE ACTIVE: BLOCKED (Outside window)"
+				fi
+				;;
+		esac
+	fi
+	echo "----------------------------------------------------------"
+	printf "%-24s %-19s %-16s %-10s\n" "Device Name" "MAC Address" "IP Address" "Status"
+	printf "%-24s %-19s %-16s %-10s\n" "------------------------" "-------------------" "----------------" "---------"
+
+	get_devices | while IFS='|' read -r name mac; do
+		ip=$(get_ip_for_mac "$mac")
+		[ -z "$ip" ] && ip="(offline)"
+
+		status="BLOCKED"
+		if [ "$CFG_ENABLED" != "1" ] || [ "$CFG_MODE" = "unlocked" ]; then
+			status="ALLOWED"
+		elif [ "$CFG_MODE" = "block" ]; then
+			status="BLOCKED"
+		else
+			if is_within_schedule; then
+				status="ALLOWED"
+			else
+				status="BLOCKED"
+			fi
+		fi
+		printf "%-24s %-19s %-16s %-10s\n" "$name" "$mac" "$ip" "$status"
+	done
+	echo "=========================================================="
+}
+
+cmd_set_time() {
+	if [ -z "$1" ] || [ -z "$2" ]; then
+		echo "Usage: internet-schedule set-time <start_time> <stop_time>"
+		exit 1
+	fi
+	new_start=$(parse_time "$1")
+	new_stop=$(parse_time "$2")
+
+	uci set internet_schedule.settings.start_time="$new_start"
+	uci set internet_schedule.settings.stop_time="$new_stop"
+	uci commit internet_schedule
+	sync_firewall
+	echo "Schedule updated to: $new_start - $new_stop"
+	cmd_status
+}
+
+cmd_unlock() {
+	uci set internet_schedule.settings.mode="unlocked"
+	uci commit internet_schedule
+	sync_firewall
+	echo "Rules UNLOCKED. Unrestricted internet granted."
+	cmd_status
+}
+
+cmd_lock() {
+	uci set internet_schedule.settings.mode="schedule"
+	uci commit internet_schedule
+	sync_firewall
+	if ! is_within_schedule; then
+		flush_flows
+	fi
+	echo "Rules LOCKED. Daily schedule enforced."
+	cmd_status
+}
+
+cmd_allow_now() {
+	if [ -n "$1" ] && echo "$1" | grep -Eq '^[0-9]+$'; then
+		mins="$1"
+		uci set internet_schedule.settings.mode="unlocked"
+		uci commit internet_schedule
+		sync_firewall
+		echo "Temporary allow for $mins minute(s)..."
+		( sleep $((mins * 60)) && uci set internet_schedule.settings.mode="schedule" && uci commit internet_schedule && /usr/bin/internet-schedule sync && /usr/bin/internet-schedule flush-flows ) >/dev/null 2>&1 &
+	else
+		cmd_unlock
+	fi
+}
+
+cmd_block_now() {
+	uci set internet_schedule.settings.mode="block"
+	uci commit internet_schedule
+	sync_firewall
+	flush_flows
+	echo "Emergency lockdown engaged."
+	cmd_status
+}
+
+cmd_add_device() {
+	if [ -z "$1" ] || [ -z "$2" ]; then
+		echo "Usage: internet-schedule add-device \"Device Name\" <MAC_ADDRESS>"
+		exit 1
+	fi
+	name="$1"
+	mac=$(echo "$2" | tr 'A-F' 'a-f')
+	if ! echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+		echo "Error: Invalid MAC address format: '$mac'"
+		exit 1
+	fi
+
+	init_config
+	sec=$(echo "dev_${mac}" | tr -d ':')
+	uci set internet_schedule."$sec"=device
+	uci set internet_schedule."$sec".name="$name"
+	uci set internet_schedule."$sec".mac="$mac"
+	uci commit internet_schedule
+
+	sync_firewall
+	echo "Added '$name' ($mac)."
+	cmd_status
+}
+
+cmd_remove_device() {
+	if [ -z "$1" ]; then
+		echo "Usage: internet-schedule remove-device <MAC_ADDRESS or Name>"
+		exit 1
+	fi
+	target=$(echo "$1" | tr 'A-F' 'a-f')
+	found=0
+
+	uci show internet_schedule 2>/dev/null | grep -E "=device$" | while read -r line; do
+		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+		name=$(uci -q get internet_schedule."$sec".name | tr 'A-F' 'a-f')
+		mac=$(uci -q get internet_schedule."$sec".mac | tr 'A-F' 'a-f')
+		if [ "$mac" = "$target" ] || [ "$name" = "$target" ]; then
+			uci -q delete internet_schedule."$sec"
+			uci commit internet_schedule
+			found=1
+		fi
+	done
+
+	sync_firewall
+	cmd_status
+}
+
+cmd_scan() {
+	echo "Scanning active network devices on LAN..."
+	echo "----------------------------------------------------------------------"
+	printf "%-16s %-18s %-25s\n" "IP Address" "MAC Address" "Hostname / Info"
+	printf "%-16s %-18s %-25s\n" "----------------" "------------------" "-------------------------"
+
+	for i in $(seq 1 254); do ping -c 1 -W 1 192.168.1.$i >/dev/null 2>&1 & done
+	wait
+
+	ip -4 neigh | grep -v 'INCOMPLETE' | grep -v 'FAILED' | sort -k1,1 -V | while read -r line; do
+		ip=$(echo "$line" | awk '{print $1}')
+		mac=$(echo "$line" | awk '{print $5}')
+		[ -z "$mac" ] || [ "$mac" = "br-lan" ] && continue
+
+		hname=$(awk -v m="$mac" '$2 == m {print $4}' /tmp/dhcp.leases 2>/dev/null | head -n 1)
+		[ "$hname" = "*" ] || [ -z "$hname" ] && hname=""
+
+		case "$mac" in
+			00:00:5e:00:53:03) hname="Roku Streambar" ;;
+			00:00:5e:00:53:01) hname="Roku Streambar Pro" ;;
+		esac
+
+		printf "%-16s %-18s %-25s\n" "$ip" "$mac" "$hname"
+	done
+	echo "----------------------------------------------------------------------"
+}
+
+case "$1" in
+	status)               cmd_status ;;
+	set-time)             shift; cmd_set_time "$@" ;;
+	unlock|disable|off)   cmd_unlock ;;
+	lock|enable|on)       cmd_lock ;;
+	allow-now)            shift; cmd_allow_now "$@" ;;
+	block-now)            cmd_block_now ;;
+	resume)               cmd_lock ;;
+	add-device)           shift; cmd_add_device "$@" ;;
+	remove-device)        shift; cmd_remove_device "$@" ;;
+	scan)                 cmd_scan ;;
+	sync)                 sync_firewall ;;
+	flush-flows)          flush_flows ;;
+	*)
+		echo "Usage: internet-schedule <command> [arguments]"
+		echo ""
+		echo "Commands:"
+		echo "  status                  Show current schedule, clock, and device states"
+		echo "  unlock / disable        Turn rules OFF (allow unrestricted internet)"
+		echo "  lock / enable           Turn rules ON (enforce daily schedule)"
+		echo "  set-time <start> <stop> Change allowed hours (e.g. 18:00 19:30 or 6pm 7:30pm)"
+		echo "  allow-now [minutes]     Temporary allow (e.g. 'allow-now 30' for 30 mins)"
+		echo "  block-now               Emergency lock (immediately kill all streams)"
+		echo "  resume                  Return to normal schedule"
+		echo "  add-device <name> <mac> Add a target device"
+		echo "  remove-device <name|mac>Remove a device"
+		echo "  scan                    Find active devices & MACs on the network"
+		echo "  sync                    Sync firewall rules with UCI configuration"
+		;;
+esac

@@ -1,0 +1,15 @@
+{
+	"admin/services/internet-schedule": {
+		"title": "Internet Schedule",
+		"order": 85,
+		"action": {
+			"type": "view",
+			"path": "internet-schedule/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-internet-schedule"
+			]
+		}
+	}
+}
