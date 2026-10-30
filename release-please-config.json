@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "package-name": "openwrt-packages",
+      "include-component-in-tag": false,
+      "release-type": "simple",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "tag-format": "v${version}",
+      "extra-files": [
+        "luci-app-screentime/Makefile"
+      ]
+    }
+  }
+}

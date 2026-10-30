@@ -1,0 +1,4 @@
+#!/bin/sh
+/etc/init.d/screentime enable
+/etc/init.d/screentime start
+exit 0

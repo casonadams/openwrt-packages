@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/screentime
+# OpenWrt procd service for Screen Time & Parental Controls
+
+# shellcheck disable=SC2034
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	/usr/bin/screentime sync
+}
+
+stop_service() {
+	uci -q delete firewall.screentime_allow
+	uci -q delete firewall.screentime_block
+	uci commit firewall
+	fw4 reload >/dev/null 2>&1
+	sed -i '/screentime/d' /etc/crontabs/root 2>/dev/null
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+
+service_triggers() {
+	procd_add_reload_trigger screentime
+}
+
+reload_service() {
+	/usr/bin/screentime sync
+}
