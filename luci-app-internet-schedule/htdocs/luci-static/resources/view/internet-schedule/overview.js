@@ -18,6 +18,13 @@ const callSystemInfo = rpc.declare({
 	expect: { '': {} }
 });
 
+const callExec = rpc.declare({
+	object: 'file',
+	method: 'exec',
+	params: [ 'command', 'params' ],
+	expect: { '': {} }
+});
+
 function parse24to12(timeStr) {
 	if (!timeStr) return { h: 6, m: 0, ampm: 'PM' };
 	const parts = String(timeStr).split(':');
@@ -76,7 +83,7 @@ function calcCutoffLabel(start24, durationMins) {
 	return h12 + ':' + mStr + ' ' + ampm + (nextDay ? ' (next day)' : '');
 }
 
-// 12-Hour Dropdown Time Picker Component
+// Custom 12-Hour Dropdown Time Picker
 const TimePicker12h = form.Value.extend({
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		const parsed = parse24to12(cfgvalue);
@@ -306,7 +313,7 @@ return view.extend({
 		m = new form.Map('internet_schedule', _('Internet Access Schedule'),
 			_('Automated daily internet curfew and access control for kids, smart TVs, and streaming devices.'));
 
-		// 1. Hero Summary Header (Theme-adaptive with boundary protection)
+		// 1. Hero Summary Header with Timezone Verification
 		s = m.section(form.NamedSection, 'settings', 'settings', _('System & Timezone Alignment'));
 		s.render = function() {
 			const tzBannerClass = tzMatch ? 'alert-message notice success' : 'alert-message warning';
@@ -375,22 +382,114 @@ return view.extend({
 			]);
 		};
 
-		// 2. Master Policy & Override Controls
-		s = m.section(form.NamedSection, 'settings', 'settings', _('Master Override Controls'));
-		s.anonymous = true;
-		s.addremove = false;
+		// 2. Instant One-Tap Overrides Section
+		s = m.section(form.NamedSection, 'settings', 'settings', _('Instant Overrides'));
+		s.render = function() {
+			const currentMode = uci.get('internet_schedule', 'settings', 'mode') || 'schedule';
+			const isEnabled = uci.get('internet_schedule', 'settings', 'enabled') !== '0';
 
-		o = s.option(form.Flag, 'enabled', _('Master Schedule Switch'),
-			_('Turn off to pause all schedules and give devices unrestricted internet access.'));
-		o.default = '1';
-		o.rmempty = false;
+			const runAction = function(modeVal, btnEl) {
+				btnEl.disabled = true;
+				ui.showIndicator('override-op', _('Applying override...'));
+				uci.set('internet_schedule', 'settings', 'enabled', '1');
+				uci.set('internet_schedule', 'settings', 'mode', modeVal);
+				uci.save()
+					.then(function() { return uci.apply(); })
+					.then(function() { return callExec('/usr/bin/internet-schedule', ['sync']); })
+					.then(function() {
+						ui.hideIndicator('override-op');
+						window.location.reload();
+					})
+					.catch(function(err) {
+						ui.hideIndicator('override-op');
+						btnEl.disabled = false;
+						ui.addNotification(null, E('p', {}, err.message || err));
+					});
+			};
 
-		o = s.option(form.ListValue, 'mode', _('Instant Override Mode'),
-			_('Override scheduled times without deleting your configured schedules.'));
-		o.value('schedule', _('Enforce Configured Schedules (Normal)'));
-		o.value('unlocked', _('Unlock All (Unrestricted Internet)'));
-		o.value('block', _('Emergency Lockdown (Block All Right Now)'));
-		o.default = 'schedule';
+			const runBonus = function(minutes, btnEl) {
+				btnEl.disabled = true;
+				ui.showIndicator('override-op', _('Granting bonus time...'));
+				callExec('/usr/bin/internet-schedule', ['allow-now', String(minutes)])
+					.then(function() {
+						ui.hideIndicator('override-op');
+						window.location.reload();
+					})
+					.catch(function(err) {
+						ui.hideIndicator('override-op');
+						btnEl.disabled = false;
+						ui.addNotification(null, E('p', {}, err.message || err));
+					});
+			};
+
+			// Button: Normal Schedule
+			const isScheduleActive = (isEnabled && currentMode === 'schedule');
+			const btnSchedule = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': isScheduleActive
+					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#007bff;color:#fff;border:1px solid #007bff;box-shadow:0 0 0 2px rgba(0,123,255,0.25);cursor:default;'
+					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+			}, [
+				E('span', { 'style': 'margin-right:6px;' }, isScheduleActive ? '✓' : '⏰'),
+				_('Enforce Schedule')
+			]);
+			if (!isScheduleActive) {
+				btnSchedule.addEventListener('click', function() { runAction('schedule', btnSchedule); });
+			}
+
+			// Button: Unlock All
+			const isUnlocked = (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled');
+			const btnUnlock = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': isUnlocked
+					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#28a745;color:#fff;border:1px solid #28a745;box-shadow:0 0 0 2px rgba(40,167,69,0.25);cursor:default;'
+					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+			}, [
+				E('span', { 'style': 'margin-right:6px;' }, isUnlocked ? '✓' : '🔓'),
+				_('Unlock All (Unrestricted)')
+			]);
+			if (!isUnlocked) {
+				btnUnlock.addEventListener('click', function() { runAction('unlocked', btnUnlock); });
+			}
+
+			// Button: Emergency Lockdown
+			const isBlocked = (isEnabled && currentMode === 'block');
+			const btnBlock = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': isBlocked
+					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#dc3545;color:#fff;border:1px solid #dc3545;box-shadow:0 0 0 2px rgba(220,53,69,0.25);cursor:default;'
+					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+			}, [
+				E('span', { 'style': 'margin-right:6px;' }, isBlocked ? '✓' : '🛑'),
+				_('Emergency Lockdown')
+			]);
+			if (!isBlocked) {
+				btnBlock.addEventListener('click', function() { runAction('block', btnBlock); });
+			}
+
+			// Button: +30 Min Bonus
+			const btnBonus30 = E('button', {
+				'type': 'button',
+				'class': 'cbi-button',
+				'style': 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+			}, [
+				E('span', { 'style': 'margin-right:6px;' }, '⏳'),
+				_('+30 Min Bonus')
+			]);
+			btnBonus30.addEventListener('click', function() { runBonus(30, btnBonus30); });
+
+			return E('div', { 'class': 'cbi-section', 'style': 'margin-bottom:20px;' }, [
+				E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:10px;align-items:center;' }, [
+					btnSchedule,
+					btnUnlock,
+					btnBlock,
+					btnBonus30
+				])
+			]);
+		};
 
 		// 3. Schedules Section
 		s = m.section(form.TableSection, 'schedule', _('Schedules'));
@@ -445,7 +544,7 @@ return view.extend({
 		o.placeholder = 'e.g. Roku Streambar Living Room';
 		o.rmempty = false;
 
-		// MAC Address picker populated with discovered devices (fixed width)
+		// MAC Address picker populated with discovered devices (standardized width)
 		o = s.option(form.Value, 'mac', _('MAC Address'));
 		o.placeholder = 'XX:XX:XX:XX:XX:XX';
 		o.datatype = 'macaddr';
