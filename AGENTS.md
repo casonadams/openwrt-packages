@@ -61,12 +61,14 @@ openwrt-packages/
 1. **Model A Layout (`form.GridSection` + Modal)**:
    - **Main Overview**: Renders a compact 4-column summary table (`Enable`, `Schedule Window`, `Applies To`, `Actions: Edit/Delete`) that fits effortlessly on small mobile screens (360px–480px) with zero horizontal overflow.
    - **Modal Editing**: Tapping `[ Edit ]` opens LuCI's native modal dialog, providing generous full-width touch controls for Days of Week (`[M] [T] [W] [T] [F] [S] [S]`), 12-hour time dropdowns (`HH:MM AM/PM`), duration, and target device selection.
-2. **Bottom Action Buttons Model**:
-   - **`[ Save & Apply ]` (`handleSaveApply`)**: Validates form values, commits `screentime` to disk via `uci.commit()`, triggers `/usr/bin/screentime sync` directly via RPCD, and reloads the view.
-   - **`[ Save ]` (`handleSave`)**: Validates and commits `screentime` to disk via `uci.commit()`.
-   - **`[ Reset ]` (`handleReset`)**: Reverts all unstaged modifications and refreshes to saved disk state.
+2. **Bottom Action Buttons (stock LuCI flow, no overrides)**:
+   - Do NOT override `handleSave`/`handleSaveApply`/`handleReset`. LuCI stages changes through session-scoped ubus `uci` calls; a CLI `uci commit` (e.g. via `file exec`) cannot see them, so the "Unsaved Changes" banner never clears and nothing reaches disk.
+   - **`[ Save & Apply ]`** runs stock `ui.changes.apply()` (commit + `reload_config`). The view listens for LuCI's `uci-applied` event and runs `/usr/bin/screentime sync` to rebuild firewall rules and cron.
+   - **`[ Save ]`** stages only; **`[ Reset ]`** reverts staged changes.
+   - Managed Devices rows with an empty MAC are pruned on save (`mac` option `write` removes the section).
 3. **Apple Screen Time Style State Header**:
-   - Header control bar displays live router clock, status badge (`Downtime Active` vs `Internet Allowed`), and one-click override trigger button (`Ignore Downtime Until Next Window` / `Turn On Downtime Now`).
+   - Header control bar displays live router clock, status badge, and one-click override button (`Ignore Downtime Until Next Window` / `Resume Schedule` / `Turn On Downtime Now`).
+   - Badge: green `Downtime Active` while the curfew is enforcing, green `Schedule Active` inside an allowed window, red `Schedule Bypassed` while the override is on.
 
 ---
 
