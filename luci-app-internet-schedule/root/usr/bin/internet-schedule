@@ -110,7 +110,7 @@ get_override_state() {
 	fi
 }
 
-# Determine if current moment is inside an allowed schedule window
+# Determine if current time falls within any active schedule window
 is_currently_in_window() {
 	now_h=$(date +%H | sed 's/^0//'); [ -z "$now_h" ] && now_h=0
 	now_m=$(date +%M | sed 's/^0//'); [ -z "$now_m" ] && now_m=0
@@ -118,13 +118,12 @@ is_currently_in_window() {
 	now_sec=$((now_h * 3600 + now_m * 60 + now_s))
 	cur_day=$(date +%a)
 
-	in_window=1 # 1 = false in ash return codes
-	uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | while read -r line; do
-		sec=$(echo "$line" | cut -d. -f2 | cut -d= -f1)
+	rm -f /tmp/internet_schedule_match
+	uci show internet_schedule 2>/dev/null | grep -E "=schedule$" | cut -d. -f2 | cut -d= -f1 | while read -r sec; do
 		sec_enabled=$(uci -q get internet_schedule."$sec".enabled || echo "1")
 		[ "$sec_enabled" = "0" ] && continue
 
-		# Check weekday
+		# Check weekday match
 		days=$(uci -q get internet_schedule."$sec".weekdays)
 		match_day=0
 		if [ -z "$days" ] || [ "$days" = "all" ]; then
@@ -142,25 +141,27 @@ is_currently_in_window() {
 		start_t=$(uci -q get internet_schedule."$sec".start_time || echo "18:00:00")
 		start_t=$(parse_time "$start_t")
 		dur=$(uci -q get internet_schedule."$sec".duration || echo "90")
-		stop_t=$(calc_stop_time "$start_t" "$dur")
 
 		s_h=$(echo "$start_t" | cut -d: -f1 | sed 's/^0//'); [ -z "$s_h" ] && s_h=0
 		s_m=$(echo "$start_t" | cut -d: -f2 | sed 's/^0//'); [ -z "$s_m" ] && s_m=0
 		s_sec=$((s_h * 3600 + s_m * 60))
-
-		e_h=$(echo "$stop_t" | cut -d: -f1 | sed 's/^0//'); [ -z "$e_h" ] && e_h=0
-		e_m=$(echo "$stop_t" | cut -d: -f2 | sed 's/^0//'); [ -z "$e_m" ] && e_m=0
-		e_sec=$((e_h * 3600 + e_m * 60))
+		e_sec=$((s_sec + dur * 60))
 
 		if [ "$now_sec" -ge "$s_sec" ] && [ "$now_sec" -lt "$e_sec" ]; then
-			exit 0
+			touch /tmp/internet_schedule_match
+			break
 		fi
 	done
-	return $?
+
+	if [ -f /tmp/internet_schedule_match ]; then
+		rm -f /tmp/internet_schedule_match
+		return 0 # True: inside schedule window
+	else
+		return 1 # False: in downtime
+	fi
 }
 
-# Determine the effective current status string
-# Returns: "downtime" or "allowed"
+# Determine the effective current state
 get_current_effective_status() {
 	override=$(get_override_state)
 	if [ "$override" = "ignore_downtime" ]; then
