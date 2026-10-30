@@ -277,48 +277,11 @@ function wrapOperation(indicatorId, msg, fn) {
 }
 
 return view.extend({
-
-	handleSaveApply: function(_ev, mode) {
-		const isSaveOnly = (mode === 'save_only');
-		const msg = isSaveOnly ? _('Saving Screen Time settings...') : _('Applying Screen Time settings...');
-		return wrapOperation('save-op', msg, function() {
-			const tasks = [];
-			document.querySelectorAll('.cbi-map').forEach(function(mapNode) {
-				const mapInst = dom.findClassInstance(mapNode);
-				if (mapInst && typeof mapInst.save === 'function') {
-					tasks.push(mapInst.save(null, true));
-				}
-			});
-			return Promise.all(tasks)
-				.then(function() {
-					return callExec('/usr/bin/screentime', ['commit']);
-				})
-				.then(function() {
-					if (!isSaveOnly) {
-						return callExec('/usr/bin/screentime', ['sync']);
-					}
-					return true;
-				})
-				.then(function() {
-					if (ui.changes && typeof ui.changes.setIndicator === 'function') {
-						ui.changes.setIndicator(0);
-					}
-					document.dispatchEvent(new CustomEvent('uci-applied'));
-					return true;
-				});
-		});
-	},
-
+	// Stock handleSave/handleSaveApply do the staging and apply; we only flag blank-row pruning.
 	handleSave: function(ev) {
-		return this.handleSaveApply(ev, 'save_only');
-	},
-
-	handleReset: function(_ev) {
-		return wrapOperation('reset-op', _('Reverting changes...'), function() {
-			return uci.unload('screentime')
-				.then(function() {
-					return uci.load('screentime');
-				});
+		window.__screentimePruneBlank = true;
+		return view.prototype.handleSave.call(this, ev).finally(function() {
+			window.__screentimePruneBlank = false;
 		});
 	},
 
@@ -351,6 +314,13 @@ return view.extend({
 		});
 
 		let m, s, o;
+		// LuCI's standard Save & Apply commits staged UCI changes; rebuild firewall/cron afterwards.
+		if (!window.__screentimeSyncBound) {
+			window.__screentimeSyncBound = true;
+			document.addEventListener('uci-applied', function() {
+				callExec('/usr/bin/screentime', ['sync']);
+			});
+		}
 
 		m = new form.Map('screentime', _('Screen Time'),
 			_('Automated curfew, bedtime scheduling, and parental controls for home network devices.'));
@@ -558,41 +528,47 @@ return view.extend({
 		s.addremove = true;
 		s.sortable = true;
 
+		// Rows added with "Add" but left without a MAC are dropped instead of saved or rejected.
+		s.parse = function() {
+			const macOpt = this.children.find(function(c) { return c.option === 'mac'; });
+			const tasks = [];
+			this.cfgsections().forEach(function(sid) {
+				const mac = macOpt.formvalue(sid);
+				if (!mac || mac === 'XX:XX:XX:XX:XX:XX') {
+					// "Add" itself triggers map.save(); only drop blank rows on a user-initiated Save.
+					if (window.__screentimePruneBlank) {
+						this.map.data.remove('screentime', sid);
+					}
+					return;
+				}
+				this.children.forEach(function(c) { tasks.push(c.parse(sid)); });
+			}, this);
+			return Promise.all(tasks);
+		};
+
 		o = s.option(form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
 		o.editable = true;
-		o.write = function(section_id, formvalue) {
-			const macVal = uci.get('screentime', section_id, 'mac');
-			if (!macVal || macVal === '' || macVal === 'XX:XX:XX:XX:XX:XX') {
-				return true;
-			}
-			return uci.set('screentime', section_id, 'enabled', formvalue);
-		};
 
 		o = s.option(form.Value, 'name', _('Device Name'));
 		o.placeholder = _('Optional (auto-detects hostname)');
 		o.rmempty = true;
 		o.write = function(section_id, formvalue) {
-			const macVal = uci.get('screentime', section_id, 'mac');
-			if (!macVal || macVal === '' || macVal === 'XX:XX:XX:XX:XX:XX') {
-				return true;
-			}
 			let nameVal = formvalue;
 			if (!nameVal) {
-				const hint = hostHints[macVal.toLowerCase()] || hostHints[macVal.toUpperCase()] || {};
-				nameVal = hint.name || '';
+				const macOpt = this.section.children.find(function(c) { return c.option === 'mac'; });
+				const mac = (macOpt.formvalue(section_id) || '').toLowerCase();
+				nameVal = (hostHints[mac] || {}).name || '';
 			}
-			if (nameVal) {
-				return uci.set('screentime', section_id, 'name', nameVal);
-			}
-			return uci.unset('screentime', section_id, 'name');
+			return nameVal ? uci.set('screentime', section_id, 'name', nameVal)
+				: uci.unset('screentime', section_id, 'name');
 		};
 
 		o = s.option(form.Value, 'mac', _('MAC Address'));
 		o.placeholder = 'XX:XX:XX:XX:XX:XX';
 		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			if (!value || value === '' || value === 'XX:XX:XX:XX:XX:XX') {
+			if (!value || value === 'XX:XX:XX:XX:XX:XX') {
 				return true;
 			}
 			if (!/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value)) {
@@ -601,9 +577,6 @@ return view.extend({
 			return true;
 		};
 		o.write = function(section_id, formvalue) {
-			if (!formvalue || formvalue === '' || formvalue === 'XX:XX:XX:XX:XX:XX') {
-				return uci.remove('screentime', section_id);
-			}
 			return uci.set('screentime', section_id, 'mac', formvalue.toLowerCase());
 		};
 		o.onchange = function(_ev, section_id, value) {

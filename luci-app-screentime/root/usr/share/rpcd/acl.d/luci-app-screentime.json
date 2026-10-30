@@ -26,17 +26,6 @@
 				"firewall"
 			],
 			"ubus": {
-				"uci": [
-					"add",
-					"set",
-					"delete",
-					"order",
-					"rename",
-					"apply",
-					"confirm",
-					"commit",
-					"revert"
-				],
 				"service": [
 					"start",
 					"stop",
