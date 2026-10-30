@@ -310,80 +310,11 @@ return view.extend({
 
 		let m, s, o;
 
-		m = new form.Map('internet_schedule', _('Internet Access Schedule'),
-			_('Automated daily internet curfew and access control for kids, smart TVs, and streaming devices.'));
+		m = new form.Map('internet_schedule', _('Internet Schedule'),
+			_('Curfew and screen time access control for kids, smart TVs, and streaming devices.'));
 
-		// 1. Hero Summary Header with Timezone Verification
-		s = m.section(form.NamedSection, 'settings', 'settings', _('System & Timezone Alignment'));
-		s.render = function() {
-			const tzBannerClass = tzMatch ? 'alert-message notice success' : 'alert-message warning';
-			const tzIcon = tzMatch ? '✓' : '⚠';
-			const tzText = tzMatch
-				? _('Router and browser timezones are aligned (%s). Scheduled times match your local wall-clock time.').format(routerTzName)
-				: _('Timezone discrepancy detected! The router is operating on <b>%s</b>, but your browser is in <b>%s</b>. Scheduled hours are evaluated against the Router clock.').format(routerTzName, browserTz);
-
-			const currentMode = uci.get('internet_schedule', 'settings', 'mode') || 'schedule';
-			const isEnabled = uci.get('internet_schedule', 'settings', 'enabled') !== '0';
-
-			let modeBadge;
-			if (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled') {
-				modeBadge = E('span', {
-					'class': 'badge',
-					'style': 'background-color:#28a745;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
-				}, _('UNLOCKED — Full Access'));
-			} else if (currentMode === 'block') {
-				modeBadge = E('span', {
-					'class': 'badge',
-					'style': 'background-color:#dc3545;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
-				}, _('LOCKED DOWN — Emergency Block'));
-			} else {
-				modeBadge = E('span', {
-					'class': 'badge',
-					'style': 'background-color:#007bff;color:#ffffff;padding:4px 8px;font-size:12px;font-weight:700;border-radius:4px;display:inline-block;white-space:normal;line-height:1.4;'
-				}, _('SCHEDULE ACTIVE — Enforcing Curfew'));
-			}
-
-			return E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': tzBannerClass, 'style': 'margin-bottom:15px;' }, [
-					E('p', {}, [
-						E('strong', {}, tzIcon + ' ' + _('Timezone Verification') + ': '),
-						E('span', {}, tzText)
-					])
-				]),
-				E('div', {
-					'class': 'cbi-section-node',
-					'style': 'display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:15px;'
-				}, [
-					// Card 1: Router Clock
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
-						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Router System Clock')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
-							E('div', { 'style': 'font-size:15px;font-weight:bold;margin-bottom:4px;' }, routerDateStr),
-							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, routerTzName + ' (' + routerTz + ')')
-						])
-					]),
-					// Card 2: Browser Clock
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
-						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Your Browser Clock')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
-							E('div', { 'style': 'font-size:15px;font-weight:bold;margin-bottom:4px;' }, browserDateStr),
-							E('div', { 'style': 'opacity:0.8;font-size:12px;' }, browserTz)
-						])
-					]),
-					// Card 3: Current Policy State
-					E('div', { 'class': 'ifacebox', 'style': 'margin:0;display:flex;flex-direction:column;justify-content:space-between;' }, [
-						E('div', { 'class': 'ifacebox-head', 'style': 'font-weight:bold;' }, _('Enforcement Status')),
-						E('div', { 'class': 'ifacebox-body', 'style': 'padding:12px;' }, [
-							E('div', { 'style': 'margin-top:2px;' }, modeBadge),
-							E('div', { 'style': 'opacity:0.8;font-size:11px;margin-top:6px;' }, _('firewall4 nftables rules'))
-						])
-					])
-				])
-			]);
-		};
-
-		// 2. Instant One-Tap Overrides Section
-		s = m.section(form.NamedSection, 'settings', 'settings', _('Instant Overrides'));
+		// 1. Unified Control Bar: Timezone badge & Instant Override Buttons
+		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const currentMode = uci.get('internet_schedule', 'settings', 'mode') || 'schedule';
 			const isEnabled = uci.get('internet_schedule', 'settings', 'enabled') !== '0';
@@ -422,16 +353,53 @@ return view.extend({
 					});
 			};
 
+			// Status indicator pill
+			let statusPill;
+			if (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled') {
+				statusPill = E('span', {
+					'style': 'background:#28a745;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
+					_('UNLOCKED')
+				]);
+			} else if (currentMode === 'block') {
+				statusPill = E('span', {
+					'style': 'background:#dc3545;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
+					_('LOCKED DOWN')
+				]);
+			} else {
+				statusPill = E('span', {
+					'style': 'background:#007bff;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#fff;margin-right:6px;' }),
+					_('SCHEDULE ENFORCED')
+				]);
+			}
+
+			// Timezone / clock pill
+			const tzPill = E('span', {
+				'title': tzMatch ? _('Router timezone matches your local time') : _('Warning: Router is in %s while browser is in %s').format(routerTzName, browserTz),
+				'style': tzMatch
+					? 'background:rgba(127,127,127,0.12);color:inherit;font-size:12px;font-weight:500;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+					: 'background:rgba(255,193,7,0.2);color:#856404;font-size:12px;font-weight:600;padding:4px 10px;border-radius:15px;display:inline-flex;align-items:center;'
+			}, [
+				E('span', { 'style': 'margin-right:5px;' }, tzMatch ? '🕒' : '⚠️'),
+				routerDateStr.split(',')[1] ? routerDateStr.split(',')[1].trim() : routerDateStr,
+				E('span', { 'style': 'opacity:0.6;margin-left:4px;' }, '(' + routerTzName + ')')
+			]);
+
 			// Button: Normal Schedule
 			const isScheduleActive = (isEnabled && currentMode === 'schedule');
 			const btnSchedule = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isScheduleActive
-					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#007bff;color:#fff;border:1px solid #007bff;box-shadow:0 0 0 2px rgba(0,123,255,0.25);cursor:default;'
-					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#007bff;color:#fff;border:1px solid #007bff;cursor:default;'
+					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
 			}, [
-				E('span', { 'style': 'margin-right:6px;' }, isScheduleActive ? '✓' : '⏰'),
+				E('span', { 'style': 'margin-right:4px;' }, isScheduleActive ? '✓' : '⏰'),
 				_('Enforce Schedule')
 			]);
 			if (!isScheduleActive) {
@@ -444,11 +412,11 @@ return view.extend({
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isUnlocked
-					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#28a745;color:#fff;border:1px solid #28a745;box-shadow:0 0 0 2px rgba(40,167,69,0.25);cursor:default;'
-					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid #28a745;cursor:default;'
+					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
 			}, [
-				E('span', { 'style': 'margin-right:6px;' }, isUnlocked ? '✓' : '🔓'),
-				_('Unlock All (Unrestricted)')
+				E('span', { 'style': 'margin-right:4px;' }, isUnlocked ? '✓' : '🔓'),
+				_('Unlock All')
 			]);
 			if (!isUnlocked) {
 				btnUnlock.addEventListener('click', function() { runAction('unlocked', btnUnlock); });
@@ -460,11 +428,11 @@ return view.extend({
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': isBlocked
-					? 'padding:10px 18px;font-size:13px;font-weight:700;border-radius:5px;background:#dc3545;color:#fff;border:1px solid #dc3545;box-shadow:0 0 0 2px rgba(220,53,69,0.25);cursor:default;'
-					: 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+					? 'padding:7px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#dc3545;color:#fff;border:1px solid #dc3545;cursor:default;'
+					: 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
 			}, [
-				E('span', { 'style': 'margin-right:6px;' }, isBlocked ? '✓' : '🛑'),
-				_('Emergency Lockdown')
+				E('span', { 'style': 'margin-right:4px;' }, isBlocked ? '✓' : '🛑'),
+				_('Lockdown')
 			]);
 			if (!isBlocked) {
 				btnBlock.addEventListener('click', function() { runAction('block', btnBlock); });
@@ -474,15 +442,22 @@ return view.extend({
 			const btnBonus30 = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
-				'style': 'padding:10px 18px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer;'
+				'style': 'padding:7px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
 			}, [
-				E('span', { 'style': 'margin-right:6px;' }, '⏳'),
-				_('+30 Min Bonus')
+				E('span', { 'style': 'margin-right:4px;' }, '⏳'),
+				_('+30 Min')
 			]);
 			btnBonus30.addEventListener('click', function() { runBonus(30, btnBonus30); });
 
-			return E('div', { 'class': 'cbi-section', 'style': 'margin-bottom:20px;' }, [
-				E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:10px;align-items:center;' }, [
+			return E('div', {
+				'class': 'cbi-section',
+				'style': 'margin-bottom:15px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;'
+			}, [
+				E('div', { 'style': 'display:flex;align-items:center;gap:10px;flex-wrap:wrap;' }, [
+					statusPill,
+					tzPill
+				]),
+				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					btnSchedule,
 					btnUnlock,
 					btnBlock,
@@ -491,7 +466,7 @@ return view.extend({
 			]);
 		};
 
-		// 3. Schedules Section
+		// 2. Schedules Section
 		s = m.section(form.TableSection, 'schedule', _('Schedules'));
 		s.anonymous = true;
 		s.addremove = true;
