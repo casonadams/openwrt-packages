@@ -284,6 +284,24 @@ const CompactDayPicker = form.Value.extend({
 });
 
 return view.extend({
+	handleSaveApply: function(ev, mode) {
+		const self = this;
+		ui.showIndicator('save-apply', _('Saving and applying schedule...'));
+		return this.handleSave(ev)
+			.then(function() {
+				return callExec('/usr/bin/internet-schedule', ['sync']);
+			})
+			.then(function() {
+				ui.hideIndicator('save-apply');
+				ui.addNotification(null, E('p', {}, _('Schedule configuration saved and applied successfully.')), 'success');
+				window.location.reload();
+			})
+			.catch(function(err) {
+				ui.hideIndicator('save-apply');
+				ui.addNotification(null, E('p', {}, err.message || err), 'danger');
+			});
+	},
+
 	load: function() {
 		return Promise.all([
 			uci.load('internet_schedule'),
