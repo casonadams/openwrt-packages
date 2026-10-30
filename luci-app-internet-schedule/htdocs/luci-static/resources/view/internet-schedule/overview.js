@@ -407,7 +407,8 @@ return view.extend({
 				E('span', { 'style': 'opacity:0.6;margin-left:4px;' }, '(' + routerTzName + ')')
 			]);
 
-			// Button: Normal Schedule
+			// Clean, unified action buttons
+			// 1. Enforce Schedule
 			const isScheduleActive = (isEnabled && currentMode === 'schedule');
 			const btnSchedule = E('button', {
 				'type': 'button',
@@ -420,7 +421,7 @@ return view.extend({
 				btnSchedule.addEventListener('click', function() { runAction('schedule', btnSchedule); });
 			}
 
-			// Button: Permanent Unlock All
+			// 2. Unlock (Infinite)
 			const isUnlocked = (!isEnabled || currentMode === 'unlocked' || currentMode === 'disabled');
 			const btnUnlock = E('button', {
 				'type': 'button',
@@ -428,39 +429,33 @@ return view.extend({
 				'style': isUnlocked
 					? 'padding:6px 14px;font-size:12px;font-weight:700;border-radius:4px;background:#28a745;color:#fff;border:1px solid #28a745;cursor:default;'
 					: 'padding:6px 14px;font-size:12px;font-weight:600;border-radius:4px;cursor:pointer;'
-			}, _('Unlock All'));
+			}, _('Unlock'));
 			if (!isUnlocked) {
 				btnUnlock.addEventListener('click', function() { runAction('unlocked', btnUnlock); });
 			}
 
-			// Temporary Unlock Group: Button + Duration Dropdown
+			// 3. Unlock with Preset Dropdown: [+ 1 hr ▼]
 			const durSelect = E('select', {
 				'class': 'cbi-input-select',
-				'style': 'padding:5px 8px;font-size:12px;border-radius:4px 0 0 4px;margin:0;border-right:none;'
+				'title': _('Select duration and click to unlock'),
+				'style': 'padding:5px 8px;font-size:12px;font-weight:600;border-radius:4px;margin:0;cursor:pointer;background:transparent;'
 			}, [
-				E('option', { 'value': '15' }, '15m'),
-				E('option', { 'value': '30', 'selected': '' }, '30m'),
-				E('option', { 'value': '45' }, '45m'),
-				E('option', { 'value': '60' }, '1 hr'),
-				E('option', { 'value': '90' }, '1.5 hr'),
-				E('option', { 'value': '120' }, '2 hr'),
-				E('option', { 'value': '180' }, '3 hr')
+				E('option', { 'value': '', 'disabled': '', 'selected': '' }, '+ Temporary...'),
+				E('option', { 'value': '15' }, '+ 15m'),
+				E('option', { 'value': '30' }, '+ 30m'),
+				E('option', { 'value': '45' }, '+ 45m'),
+				E('option', { 'value': '60' }, '+ 1 hr'),
+				E('option', { 'value': '90' }, '+ 1.5 hr'),
+				E('option', { 'value': '120' }, '+ 2 hr'),
+				E('option', { 'value': '180' }, '+ 3 hr')
 			]);
-
-			const btnTempUnlock = E('button', {
-				'type': 'button',
-				'class': 'cbi-button',
-				'style': 'padding:6px 12px;font-size:12px;font-weight:600;border-radius:0 4px 4px 0;margin:0;cursor:pointer;'
-			}, _('Unlock For'));
-			btnTempUnlock.addEventListener('click', function() {
-				runBonus(parseInt(durSelect.value, 10), btnTempUnlock);
+			durSelect.addEventListener('change', function() {
+				if (this.value) {
+					runBonus(parseInt(this.value, 10), durSelect);
+				}
 			});
 
-			const tempUnlockGroup = E('div', {
-				'style': 'display:inline-flex;align-items:center;'
-			}, [durSelect, btnTempUnlock]);
-
-			// Button: Emergency Lockdown
+			// 4. Lockdown
 			const isBlocked = (isEnabled && currentMode === 'block');
 			const btnBlock = E('button', {
 				'type': 'button',
@@ -484,7 +479,7 @@ return view.extend({
 				E('div', { 'style': 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
 					btnSchedule,
 					btnUnlock,
-					tempUnlockGroup,
+					durSelect,
 					btnBlock
 				])
 			]);
