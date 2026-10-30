@@ -318,6 +318,11 @@ return view.extend({
 		s.addremove = true;
 		s.sortable = true;
 
+		// Active Switch (first column)
+		o = s.option(StatusFlag, 'enabled', _('Active'));
+		o.default = '1';
+		o.rmempty = false;
+
 		// Friendly Schedule Name (Schedule A, B...)
 		o = s.option(form.Value, 'name', _('Schedule Name'));
 		o.placeholder = 'e.g. Schedule A (Weekdays)';
@@ -360,14 +365,8 @@ return view.extend({
 			return '<span style="font-weight:600;display:inline-block;padding:2px 0;">' + cutoffStr + '</span>';
 		};
 
-		// Active Switch with subtle status styling
-		o = s.option(StatusFlag, 'enabled', _('Active'));
-		o.default = '1';
-		o.rmempty = false;
-
-		// 4. Target Devices Section (Table with Device Auto-Discovery)
-		s = m.section(form.TableSection, 'device', _('Target Devices to Restrict'),
-			_('Select the devices subject to these schedules (Rokus, Samsung TVs, tablets, gaming consoles). Uncheck "Active" to temporarily exempt a device from curfews without deleting it.'));
+		// 4. Devices Section
+		s = m.section(form.TableSection, 'device', _('Devices'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
