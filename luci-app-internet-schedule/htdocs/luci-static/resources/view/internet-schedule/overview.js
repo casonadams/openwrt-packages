@@ -155,6 +155,13 @@ const TimePicker12h = form.Value.extend({
 
 // Interactive Pill Button (Enabled/Disabled)
 const StatusFlag = form.Value.extend({
+	rmempty: false,
+	default: '1',
+
+	validate: function(section_id, value) {
+		return true;
+	},
+
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		let isEnabled = (cfgvalue !== '0' && cfgvalue !== false && cfgvalue !== '');
 
