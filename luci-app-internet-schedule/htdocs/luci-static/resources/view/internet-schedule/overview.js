@@ -300,7 +300,7 @@ return view.extend({
 		const stateRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'downtime|none';
 
 		const stateParts = stateRaw.split('|');
-		const currentStatus = stateParts[0] || 'downtime'; // 'downtime' or 'allowed'
+		const currentStatus = stateParts[0] || 'downtime'; // 'downtime' (blocked) or 'allowed' (internet open)
 		const overrideMode = stateParts[1] || 'none';     // 'none', 'ignore_downtime', or 'forced_downtime'
 
 		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
@@ -316,7 +316,7 @@ return view.extend({
 
 		m = new form.Map('internet_schedule', _('Internet Schedule'));
 
-		// 1. Apple Screen Time Header Control Bar
+		// 1. Natural Header Control Bar: "Pause Until Next Window" / "Resume Schedule"
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			const runAction = function(cmd, el) {
@@ -336,19 +336,33 @@ return view.extend({
 
 			// Status badge
 			let statusBadge;
-			if (currentStatus === 'downtime') {
-				statusBadge = E('div', {
-					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
-				}, [
-					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
-					_('Downtime Active')
-				]);
-			} else {
+			if (overrideMode === 'ignore_downtime') {
 				statusBadge = E('div', {
 					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
 				}, [
 					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
-					_('Internet Allowed')
+					_('Paused Until Next Window')
+				]);
+			} else if (overrideMode === 'forced_downtime') {
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(220,53,69,0.15);color:#dc3545;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#dc3545;margin-right:6px;' }),
+					_('Blocked Until Next Window')
+				]);
+			} else if (currentStatus === 'allowed') {
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(40,167,69,0.15);color:#28a745;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#28a745;margin-right:6px;' }),
+					_('Schedule Active (Open)')
+				]);
+			} else {
+				statusBadge = E('div', {
+					'style': 'display:inline-flex;align-items:center;background:rgba(108,117,125,0.15);color:#6c757d;padding:4px 10px;border-radius:15px;font-size:12px;font-weight:700;'
+				}, [
+					E('span', { 'style': 'display:inline-block;width:7px;height:7px;border-radius:50%;background:#6c757d;margin-right:6px;' }),
+					_('Schedule Active (Blocked)')
 				]);
 			}
 
@@ -357,39 +371,28 @@ return view.extend({
 				'style': 'font-size:12px;opacity:0.75;font-weight:500;'
 			}, routerTimeStr + ' (' + routerTzName + ')');
 
-			// Apple Action Button:
-			// If in Downtime -> "Ignore Downtime Until Schedule"
-			// If Internet Allowed -> "Turn On Downtime Until Schedule"
+			// Natural Action Button
 			const actionBtn = E('button', {
 				'type': 'button',
 				'class': 'cbi-button',
 				'style': 'padding:4px 12px;font-size:11px;font-weight:600;border-radius:14px;background:rgba(127,127,127,0.12);color:inherit;border:1px solid rgba(127,127,127,0.3);cursor:pointer;'
 			});
 
-			if (currentStatus === 'downtime') {
-				if (overrideMode === 'forced_downtime') {
-					actionBtn.textContent = _('Cancel Downtime');
-					actionBtn.addEventListener('click', function() {
-						runAction('clear-override', actionBtn);
-					});
-				} else {
-					actionBtn.textContent = _('Ignore Downtime Until Schedule');
-					actionBtn.addEventListener('click', function() {
-						runAction('ignore-downtime', actionBtn);
-					});
-				}
+			if (overrideMode !== 'none') {
+				actionBtn.textContent = _('Resume Schedule');
+				actionBtn.addEventListener('click', function() {
+					runAction('clear-override', actionBtn);
+				});
+			} else if (currentStatus === 'downtime') {
+				actionBtn.textContent = _('Pause Until Next Window');
+				actionBtn.addEventListener('click', function() {
+					runAction('ignore-downtime', actionBtn);
+				});
 			} else {
-				if (overrideMode === 'ignore_downtime') {
-					actionBtn.textContent = _('Turn On Downtime');
-					actionBtn.addEventListener('click', function() {
-						runAction('clear-override', actionBtn);
-					});
-				} else {
-					actionBtn.textContent = _('Turn On Downtime Until Schedule');
-					actionBtn.addEventListener('click', function() {
-						runAction('turn-on-downtime', actionBtn);
-					});
-				}
+				actionBtn.textContent = _('Block Until Next Window');
+				actionBtn.addEventListener('click', function() {
+					runAction('turn-on-downtime', actionBtn);
+				});
 			}
 
 			return E('div', {
