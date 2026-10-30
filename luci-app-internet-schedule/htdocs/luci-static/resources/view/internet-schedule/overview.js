@@ -445,11 +445,26 @@ return view.extend({
 		o.placeholder = 'e.g. Roku Streambar Living Room';
 		o.rmempty = false;
 
-		// MAC Address picker populated with discovered devices
+		// MAC Address picker populated with discovered devices (fixed width)
 		o = s.option(form.Value, 'mac', _('MAC Address'));
 		o.placeholder = 'XX:XX:XX:XX:XX:XX';
 		o.datatype = 'macaddr';
 		o.rmempty = false;
+
+		const originalRenderWidget = o.renderWidget;
+		o.renderWidget = function(section_id, option_index, cfgvalue) {
+			const node = originalRenderWidget.apply(this, [section_id, option_index, cfgvalue]);
+			if (node) {
+				node.style.width = '100%';
+				node.style.maxWidth = '360px';
+				const inputOrSelect = node.querySelector('input, select');
+				if (inputOrSelect) {
+					inputOrSelect.style.width = '100%';
+					inputOrSelect.style.maxWidth = '360px';
+				}
+			}
+			return node;
+		};
 
 		// Populate dropdown with active/known network hosts from luci-rpc getHostHints
 		const sortedMacs = Object.keys(hostHints).sort();
