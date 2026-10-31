@@ -357,6 +357,14 @@ return view.extend({
 			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
 		};
 
+		o = s.option(form.DynamicList, 'fallback', _('Fallback DNS servers (optional)'));
+		o.rmempty = true;
+		o.placeholder = 'https://doh.cleanbrowsing.org/doh/family-filter/';
+		o.description = _('Used only when every upstream of a query fails, so devices still get (filtered) DNS if their profile servers are down.');
+		o.validate = function(_section_id, value) {
+			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
+		};
+
 		o = s.option(form.DummyValue, '_setup', _('Setup'));
 		o.renderWidget = function() {
 			setupBtn = E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-action important' }, _('Set up'));

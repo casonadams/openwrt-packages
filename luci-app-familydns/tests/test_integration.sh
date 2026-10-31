@@ -39,10 +39,13 @@ assert_eq "tracker is blocked for dad" 0.0.0.0 "$(python3 "$SCRIPT_DIR/dot_query
 assert_eq "an unknown device name still gets DNS" yes "$([ -n "$(python3 "$SCRIPT_DIR/dot_query.py" "$PORT" stranger.test.duckdns.org example.com "$TMP/ca.crt")" ] && echo yes)"
 python3 "$SCRIPT_DIR/dot_query.py" "$PORT" kid1.test.duckdns.org example.com "$TMP/ca.crt" >/dev/null
 python3 "$SCRIPT_DIR/dot_query.py" "$PORT" dad.test.duckdns.org example.org "$TMP/ca.crt" >/dev/null
+kid2=$(python3 "$SCRIPT_DIR/dot_query.py" "$PORT" kid2.test.duckdns.org example.net "$TMP/ca.crt")
+assert_eq "a dead profile upstream still resolves through the fallback" yes "$([ -n "$kid2" ] && echo yes)"
 log=$(in_container querylog)
 assert_eq "query log attributes queries to kid1" yes "$(echo "$log" | grep -qw kid1 && echo yes)"
 assert_eq "query log attributes queries to dad" yes "$(echo "$log" | grep -qw dad && echo yes)"
 assert_eq "kid1 resolves through its profile's own upstream" "kid1 upstream: 1.0.0.1:53" "$(echo "$log" | grep '^kid1 upstream')"
+assert_eq "the fallback server answered for kid2" "kid2 upstream: 9.9.9.9:53" "$(echo "$log" | grep '^kid2 upstream')"
 assert_eq "dad (no profile upstream) uses the global upstream" "dad upstream: 1.1.1.1:53" "$(echo "$log" | grep '^dad upstream')"
 
 echo "-> Network-wide DNS through AdGuard Home"
@@ -68,7 +71,7 @@ assert_eq "DoT is listening" true "$(field agh.dot_listening)"
 assert_eq "firewall rule exists" true "$(field firewall_open)"
 assert_eq "network DNS is on" true "$(field lan.enabled)"
 assert_eq "network DNS is active" true "$(field lan.active)"
-assert_eq "both devices are in AdGuard Home" '[true,true]' "$(field 'devices.map(x => x.in_agh)')"
+assert_eq "all devices are in AdGuard Home" '[true,true,true]' "$(field 'devices.map(x => x.in_agh)')"
 assert_eq "device DoT host" kid1.test.duckdns.org "$(field 'devices[0].dot_host')"
 profile=$(in_container profile)
 assert_eq "locked profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
@@ -81,7 +84,7 @@ assert_eq "the redirect is removed" "redirect after off: ''" "$(echo "$off" | gr
 re=$(in_container resync)
 assert_eq "removed device disappears from AdGuard Home" "dad client name after removal: ''" "$(echo "$re" | sed -n 1p)"
 assert_eq "other devices are untouched" "kid1 client name still present: 'Kid One'" "$(echo "$re" | sed -n 2p)"
-assert_eq "managed list follows" "managed: kid1 " "$(echo "$re" | sed -n 3p)"
+assert_eq "managed list follows" "managed: kid1 kid2 " "$(echo "$re" | sed -n 3p)"
 td=$(in_container teardown)
 assert_eq "teardown removes managed clients" "kid1 after teardown: ''" "$(echo "$td" | grep 'kid1 after teardown')"
 assert_eq "teardown removes the firewall rule" "firewall rule: ''" "$(echo "$td" | grep 'firewall rule')"

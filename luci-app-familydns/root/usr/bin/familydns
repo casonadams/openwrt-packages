@@ -237,6 +237,15 @@ tls_wanted() {
 	echo "true $(domain) $(dot_port) $AGH_DIR/tls/fullchain.pem "
 }
 
+# Used only when every upstream of a query fails, so a dead profile upstream still resolves (safely).
+apply_fallback() {
+	fb=$(setting fallback)
+	[ -n "$fb" ] || return 0
+	list=""
+	for u in $fb; do list="$list${list:+,}\"$(json_escape "$u")\""; done
+	agh_post /control/dns_config "{\"fallback_dns\":[$list]}" >/dev/null
+}
+
 ensure_tls() {
 	if [ "$(tls_current)" != "$(tls_wanted)" ]; then
 		agh_post /control/tls/configure "$(tls_body)" >/dev/null || { MSG="TLS configuration was rejected"; return 1; }
@@ -257,6 +266,7 @@ stage_agh() {
 	if wizard_up; then agh_install || return 1; fi
 	wait_for agh_ready 30 || { MSG="AdGuard Home API did not come up"; return 1; }
 	ensure_tls || return 1
+	apply_fallback || { MSG="could not set the fallback DNS servers"; return 1; }
 	MSG="DoT enabled"
 }
 
@@ -515,7 +525,10 @@ cmd_reconcile() {
 	validate_settings || return 1
 	cert_present && install_cert
 	agh_ready || /etc/init.d/adguardhome start >/dev/null 2>&1
-	wait_for agh_ready 30 && ensure_tls
+	if wait_for agh_ready 30; then
+		ensure_tls
+		apply_fallback
+	fi
 	stage_firewall
 	stage_clients
 	stage_lan

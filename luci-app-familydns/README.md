@@ -10,12 +10,13 @@ Install: see the [repository README](../README.md#install). Your household DNS i
 
 1. Create a DuckDNS name and note its token.
 2. **Services → Family DNS**: enter the domain (`<name>.duckdns.org`), token and email, tick *Enabled*, **Save & Apply**, then **Set up / Repair**. Certificate issuance takes about two minutes.
-3. Pick **Profiles** (each sets filters and, optionally, its own DNS servers; the defaults use Cloudflare's family endpoint for kids and the standard Cloudflare endpoint for adults), then add **Devices** (a name, an id such as `kid1`, and a profile), **Save & Apply**, then **Install profile** and AirDrop the file to the device.
+3. Pick **Profiles** (each sets filters and, optionally, its own DNS servers; the defaults use CleanBrowsing's family filter for kids and its security filter for adults), then add **Devices** (a name, an id such as `kid1`, and a profile), **Save & Apply**, then **Install profile** and AirDrop the file to the device.
 
 The AdGuard Home admin UI is at `http://<router>:3001` (LAN only); its generated password is in `/etc/adguardhome/admin.pass`.
 
 ## Notes
 
+- **Failover:** *Fallback DNS servers* (default: CleanBrowsing's family filter plus its plain-IP resolver) are used only when every upstream of a query fails, so a dead profile server still resolves, safely but without your extra filters. This is server-side: an iPhone cannot switch to a second resolver by itself, so if the router or the DoT port is unreachable the phone falls back to Apple's normal behaviour for an unreachable DNS profile.
 - Port 853/TCP is opened on the WAN; nothing else is. Device ids act like secrets: a device only gets its profile if it knows its hostname, and unknown names still resolve with global settings.
 - A locked profile only prevents removal on supervised iPhones (Apple Configurator or MDM).
 - If your upstream filter blocks `duckdns.org`, setup adds a narrow `dnsmasq` rule for `www.duckdns.org` only; removing the package takes it out.

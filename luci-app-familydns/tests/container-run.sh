@@ -22,7 +22,12 @@ setup)
 	uci -q delete familydns.kids.upstream
 	uci -q delete familydns.adult.upstream
 	uci add_list familydns.kids.upstream=1.0.0.1
-	for d in "Kid One|kid1|kids" "Dad|dad|adult"; do
+	uci set familydns.broken=profile
+	uci set familydns.broken.name=Broken
+	uci set familydns.broken.filtering=0
+	uci add_list familydns.broken.upstream=127.0.0.1:9
+	uci add_list familydns.settings.fallback=9.9.9.9
+	for d in "Kid One|kid1|kids" "Dad|dad|adult" "Kid Two|kid2|broken"; do
 		IFS='|' read -r n i p <<EOT
 $d
 EOT
@@ -84,6 +89,7 @@ querylog)
 	agh_get '/control/querylog?limit=20' | jsonfilter -e '@.data[*].client_id' | tr '\n' ' '
 	echo
 	echo "kid1 upstream: $(agh_get '/control/querylog?limit=20&search=example.com' | jsonfilter -e '@.data[@.client_id="kid1"].upstream' | head -1)"
+	echo "kid2 upstream: $(agh_get '/control/querylog?limit=20&search=example.net' | jsonfilter -e '@.data[@.client_id="kid2"].upstream' | head -1)"
 	echo "dad upstream: $(agh_get '/control/querylog?limit=20&search=example.org' | jsonfilter -e '@.data[@.client_id="dad"].upstream' | head -1)"
 	;;
 resync)
