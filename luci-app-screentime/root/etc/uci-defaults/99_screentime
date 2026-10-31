@@ -1,4 +1,7 @@
 #!/bin/sh
+# Seed the config on first install (it is not a packaged conffile, so upgrades never leave .apk-new).
+[ -e /etc/config/screentime ] || cp /usr/share/screentime/default.config /etc/config/screentime
+
 # Drop rules written by releases that used fw4 UCI rules.
 legacy=$(uci -q show firewall | awk -F= '$1 ~ /^firewall\.screentime_[^.]*$/ {sub(/^firewall\./, "", $1); print $1}')
 if [ -n "$legacy" ]; then

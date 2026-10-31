@@ -22,14 +22,14 @@ luci-app-screentime/
 │   ├── view/screentime/overview.js   # LuCI view (GridSection + modal)
 │   └── screentime/format.js          # Pure formatting/banner helpers (unit-tested)
 └── root/
-    ├── etc/config/screentime         # UCI defaults
     ├── etc/init.d/screentime         # procd service: installs the per-minute cron, reconciles
     ├── etc/hotplug.d/ntp/99-screentime
     ├── etc/uci-defaults/99_screentime
     └── usr/
         ├── bin/screentime            # Engine: applies decisions as an nft set, flushes conntrack
         └── share/
-            ├── screentime/decide.awk # "Is this device allowed now?" (single source of truth)
+            ├── screentime/decide.awk      # "Is this device allowed now?" (single source of truth)
+            ├── screentime/default.config  # Copied to /etc/config/screentime on first install only
             ├── luci/menu.d/luci-app-screentime.json
             └── rpcd/acl.d/luci-app-screentime.json
 ```
