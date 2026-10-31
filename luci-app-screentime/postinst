@@ -1,0 +1,8 @@
+#!/bin/sh
+# Package post-install: run first-boot defaults now and start the service.
+if [ -x /etc/uci-defaults/99_screentime ]; then
+	/etc/uci-defaults/99_screentime && rm -f /etc/uci-defaults/99_screentime
+fi
+rm -rf /tmp/luci-* /var/luci-* 2>/dev/null
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
+exit 0

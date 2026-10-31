@@ -1,0 +1,6 @@
+#!/bin/sh
+# Package pre-deinstall: stop enforcement and remove runtime state before the files go away.
+/etc/init.d/screentime stop >/dev/null 2>&1
+/etc/init.d/screentime disable >/dev/null 2>&1
+rm -f /etc/screentime.override
+exit 0

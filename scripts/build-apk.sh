@@ -37,27 +37,14 @@ echo "Building APKv3 package: ${PKG} (${VERSION})..."
 STAGING="/tmp/pkg_staging_${PKG}"
 rm -rf "$STAGING"
 mkdir -p "$OUTPUT_DIR"
-mkdir -p "$STAGING/etc/config" \
-         "$STAGING/etc/init.d" \
-         "$STAGING/etc/uci-defaults" \
-         "$STAGING/usr/bin" \
-         "$STAGING/usr/share/luci/menu.d" \
-         "$STAGING/usr/share/rpcd/acl.d" \
-         "$STAGING/www/luci-static/resources/view/screentime"
+mkdir -p "$STAGING/www"
 
 # Copy package payload files
-[ -d "$PKG/root/etc/config" ] && cp -r "$PKG/root/etc/config/"* "$STAGING/etc/config/"
-[ -d "$PKG/root/etc/init.d" ] && cp -r "$PKG/root/etc/init.d/"* "$STAGING/etc/init.d/"
-[ -d "$PKG/root/etc/uci-defaults" ] && cp -r "$PKG/root/etc/uci-defaults/"* "$STAGING/etc/uci-defaults/"
-[ -d "$PKG/root/usr/bin" ] && cp -r "$PKG/root/usr/bin/"* "$STAGING/usr/bin/"
-[ -d "$PKG/root/usr/share/luci/menu.d" ] && cp -r "$PKG/root/usr/share/luci/menu.d/"* "$STAGING/usr/share/luci/menu.d/"
-[ -d "$PKG/root/usr/share/rpcd/acl.d" ] && cp -r "$PKG/root/usr/share/rpcd/acl.d/"* "$STAGING/usr/share/rpcd/acl.d/"
-[ -d "$PKG/htdocs/luci-static/resources/view/screentime" ] && cp -r "$PKG/htdocs/luci-static/resources/view/screentime/"* "$STAGING/www/luci-static/resources/view/screentime/"
+cp -r "$PKG/root/." "$STAGING/"
+cp -r "$PKG/htdocs/." "$STAGING/www/"
 
 # Set executable bits
-for f in "$STAGING/etc/init.d/"* "$STAGING/etc/uci-defaults/"* "$STAGING/usr/bin/"*; do
-	[ -f "$f" ] && chmod +x "$f"
-done
+chmod +x "$STAGING/etc/init.d/"* "$STAGING/etc/uci-defaults/"* "$STAGING/etc/hotplug.d/ntp/"* "$STAGING/usr/bin/"*
 
 # Build official APKv3 ADB package
 OUT_FILE="${OUTPUT_DIR}/${PKG}_${VERSION}_noarch.apk"
@@ -70,6 +57,9 @@ apk mkpkg \
   --info license:"Apache-2.0" \
   --info url:"https://github.com/casonadams/openwrt-packages" \
   --info depends:"conntrack libc luci-base" \
+  --script post-install:"$PKG/postinst" \
+  --script post-upgrade:"$PKG/postinst" \
+  --script pre-deinstall:"$PKG/prerm" \
   --output "$OUT_FILE"
 
 rm -rf "$STAGING"
