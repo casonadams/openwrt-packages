@@ -46,5 +46,5 @@ jobs:
       - name: Upload release assets
         run: |
           cd dist
-          sha256sum -- *.apk > SHA256SUMS
-          gh release upload "$TAG" -- *.apk SHA256SUMS --clobber
+          sha256sum ./*.apk > SHA256SUMS
+          gh release upload "$TAG" ./*.apk SHA256SUMS --clobber

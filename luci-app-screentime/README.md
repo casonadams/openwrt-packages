@@ -2,23 +2,12 @@
 
 Schedule-based parental controls for OpenWrt 25+ (nftables). Managed devices have network access **only during scheduled windows**; outside every window they are blocked, unless you choose **Ignore Downtime Until Next Window**.
 
-- **LuCI UI** under **Services → Screen Time**: a banner with the current state and when it ends, a per-device status column, and a one-click override. Schedules are edited in a mobile-friendly modal (days, start time, duration, target devices).
+- **LuCI UI** under **Services → Screen Time**: a banner with the current state and when it ends, a per-device status column, and a one-click override. Schedules are edited in a mobile-friendly modal.
 - **CLI** (`screentime`) for the same controls over SSH.
-- **Hard cutoff**: blocked MACs live in a private `inet screentime` nft table (`firewall4` config is untouched), and active connections of a newly blocked device are dropped with `conntrack` (IPv4 and IPv6).
-- **No daemon, no compiled code**: cron reconciles every minute and when NTP syncs, so the package is `noarch` and runs on any architecture. Configuration is plain UCI (`/etc/config/screentime`) and survives sysupgrades.
+- **Hard cutoff**: blocked MACs live in a private nft table (`firewall4` config is untouched), and a newly blocked device's active connections are dropped with `conntrack` (IPv4 and IPv6).
+- **No daemon, nothing compiled**: cron reconciles every minute, so the package is `noarch` and runs on any architecture. Configuration is plain UCI (`/etc/config/screentime`).
 
-## Install
-
-```bash
-wget -O /etc/apk/keys/casonadams.pub https://casonadams.github.io/openwrt-packages/casonadams.pub
-echo "https://casonadams.github.io/openwrt-packages/packages.adb" > /etc/apk/repositories.d/casonadams.list
-apk update
-apk add luci-app-screentime
-```
-
-Or: `wget -qO- https://raw.githubusercontent.com/casonadams/openwrt-packages/main/install.sh | sh`
-
-The service is enabled and started on install; removing the package cleans up its rules and cron entry.
+Install and upgrade instructions are in the [repository README](../README.md#install). The service starts on install; removing the package cleans up its rules and cron entry.
 
 ## Use
 
