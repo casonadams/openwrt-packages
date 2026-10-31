@@ -73,5 +73,16 @@ check('override is annotated', fmt.describeDevice({ allowed: false, reason: 'ove
 check('no change scheduled', fmt.describeDevice({ allowed: false, reason: 'schedule', change_at: null }, base, OFFSET),
 	{ allowed: false, text: 'Blocked' });
 
+
+console.log('-> validators accept empty input');
+const viewSource = fs.readFileSync(path.join(__dirname, '..',
+	'htdocs/luci-static/resources/view/screentime/overview.js'), 'utf8');
+const validators = viewSource.split(/\.validate = function/).slice(1);
+check('the view defines validators', validators.length > 0, true);
+validators.forEach(function(block, i) {
+	check('validator #' + (i + 1) + ' accepts blank input', /!value|=== ''/.test(block.slice(0, 400)), true);
+});
+check('no option is marked required (blank rows and defaults must save)', /\.required = true/.test(viewSource), false);
+
 console.log('==========================================');
 console.log(' UI results: ' + passed + ' passed');
