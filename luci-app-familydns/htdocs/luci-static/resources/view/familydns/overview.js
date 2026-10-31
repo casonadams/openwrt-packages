@@ -78,8 +78,30 @@ function confirmLocked(clientId) {
 	]);
 }
 
+// LuCI is usually served over plain HTTP, where navigator.clipboard does not exist.
+function copyText(text) {
+	if (navigator.clipboard && window.isSecureContext)
+		return navigator.clipboard.writeText(text);
+	return new Promise(function(resolve, reject) {
+		const area = E('textarea', { 'readonly': '', 'style': 'position:fixed;top:0;left:0;opacity:0;' });
+		area.value = text;
+		document.body.appendChild(area);
+		area.select();
+		area.setSelectionRange(0, text.length);
+		let ok = false;
+		try {
+			ok = document.execCommand('copy');
+		} catch (e) {
+			ok = false;
+		}
+		document.body.removeChild(area);
+		if (ok) resolve();
+		else reject(new Error(_('The browser blocked copying. Show the password and copy it by hand.')));
+	});
+}
+
 function copyPassword(password) {
-	navigator.clipboard.writeText(password).then(function() {
+	return copyText(password).then(function() {
 		ui.addNotification(null, E('p', _('Password copied to the clipboard.')), 'info');
 	}, notifyError);
 }
@@ -172,13 +194,26 @@ return view.extend({
 			}).catch(notifyError);
 		};
 
+		const openAdGuard = function() {
+			const win = window.open('', '_blank');
+			return fetchAdmin().then(function(creds) {
+				return copyText(creds.password).then(function() {
+					ui.addNotification(null, E('p', _('Password copied. Sign in as %s and paste it.').format(creds.username)), 'info');
+				}, function() {
+					ui.addNotification(null, E('p', _('Could not copy the password. Use Show login to copy it by hand.')));
+				}).then(function() {
+					if (win) win.location.href = creds.url;
+					else showLogin();
+				});
+			}).catch(function(err) {
+				if (win) win.close();
+				notifyError(err);
+			});
+		};
+
 		const adminButtons = function() {
-			const open = E('a', {
-				'class': 'btn cbi-button cbi-button-action important',
-				'href': state.agh.admin_url,
-				'target': '_blank',
-				'rel': 'noopener noreferrer'
-			}, _('Open AdGuard Home'));
+			const open = E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-action important' }, _('Open AdGuard Home'));
+			open.addEventListener('click', ui.createHandlerFn(self, openAdGuard));
 			const login = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Show login'));
 			login.addEventListener('click', ui.createHandlerFn(self, showLogin));
 			return E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:6px;' }, [ open, login ]);

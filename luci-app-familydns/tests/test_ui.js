@@ -237,6 +237,7 @@ validators.forEach(function(block, i) {
 	const body = block.slice(0, 600);
 	check('validator #' + (i + 1) + ' accepts blank input', /checkOptional\(|!value|!fmt\.|=== ''/.test(body), true);
 });
+check('clipboard use has an insecure-context fallback', !/navigator\.clipboard/.test(viewSource) || /execCommand/.test(viewSource), true);
 check('no option is marked required (blank rows and defaults must save)', /\.required = true/.test(viewSource), false);
 
 check('checkOptional accepts an empty string', fmt.checkOptional('', function() { return false; }, 'bad'), true);

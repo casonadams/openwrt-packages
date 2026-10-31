@@ -59,4 +59,5 @@ These bit us twice (screentime's blank MAC rows, familydns' optional upstream li
 - **Never set `required = true`** on options whose defaults are empty; use `rmempty = true` and enforce required values where they are used (the engine's own validation, a disabled "Set up" button), not in the form.
 - **Blank table rows are pruned on an explicit Save**, not on the Add-triggered silent save: `handleSave` sets a `pruneBlank` flag around the stock handler and the section's `parse` removes rows with no meaningful value when it is set.
 - **Custom widgets** (plain DOM, no `ui` element) are never validated by LuCI; check them in the option's `parse`.
+- **LuCI is usually served over plain HTTP**, so `navigator.clipboard` does not exist; copy with a `document.execCommand('copy')` fallback and tell the user honestly when copying fails (a silent failure leaves stale clipboard contents that get pasted by mistake).
 - Each package's `tests/test_ui.js` has a guard that fails when a `.validate` function does not handle blank input or when `required = true` appears; keep it passing and keep pure validation helpers in `format.js` with tests for `''`.
