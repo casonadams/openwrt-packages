@@ -103,10 +103,12 @@ client_json() {
 	printf '"ignore_querylog":false,"ignore_statistics":false}'
 }
 
-# mobileconfig: Apple DNS-over-TLS profile from MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_UUID1 MC_UUID2
+# mobileconfig: Apple DNS-over-TLS profile from MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_FAILOVER MC_UUID1 MC_UUID2
 mobileconfig() {
 	lock=false
 	[ "$MC_LOCK" = 1 ] && lock=true
+	failover=""
+	[ "$MC_FAILOVER" = 1 ] && failover="<key>AllowFailover</key><true/>"
 	addresses=""
 	[ -n "$MC_IP" ] && addresses="<key>ServerAddresses</key><array><string>$(xml_escape "$MC_IP")</string></array>"
 	name=$(xml_escape "$MC_NAME")
@@ -126,6 +128,7 @@ mobileconfig() {
 				<key>ServerName</key>
 				<string>$host</string>
 				$addresses
+				$failover
 			</dict>
 			<key>PayloadDescription</key>
 			<string>Sends DNS to the home resolver as $name</string>

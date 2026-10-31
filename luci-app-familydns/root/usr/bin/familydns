@@ -554,9 +554,11 @@ cmd_profile() {
 		MC_IP=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
 		MC_LOCK=0
 		[ "$2" = --lock ] && MC_LOCK=1
+		MC_FAILOVER=1
+		[ "$(setting allow_failover)" = 0 ] && MC_FAILOVER=0
 		MC_UUID1=$(new_uuid)
 		MC_UUID2=$(new_uuid)
-		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_UUID1 MC_UUID2
+		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_FAILOVER MC_UUID1 MC_UUID2
 		mobileconfig
 		return 0
 	done

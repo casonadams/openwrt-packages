@@ -109,9 +109,9 @@ assert_eq "adult profile leaves parental off" false "$(json_get "$dad" parental_
 assert_eq "adult profile uses global blocked services" true "$(json_get "$dad" use_global_blocked_services)"
 
 echo "-> Apple profile"
-MC_NAME='Kid "One" <iPhone>' MC_CLIENT_ID=kid1 MC_DOMAIN=example.duckdns.org MC_IP=203.0.113.7 MC_LOCK=0 \
+MC_NAME='Kid "One" <iPhone>' MC_CLIENT_ID=kid1 MC_DOMAIN=example.duckdns.org MC_IP=203.0.113.7 MC_LOCK=0 MC_FAILOVER=1 \
 	MC_UUID1=11111111-1111-1111-1111-111111111111 MC_UUID2=22222222-2222-2222-2222-222222222222 mobileconfig > "$TEST_TMP/open.mobileconfig"
-MC_NAME=Dad MC_CLIENT_ID=dad MC_DOMAIN=example.duckdns.org MC_IP='' MC_LOCK=1 \
+MC_NAME=Dad MC_CLIENT_ID=dad MC_DOMAIN=example.duckdns.org MC_IP='' MC_LOCK=1 MC_FAILOVER=0 \
 	MC_UUID1=11111111-1111-1111-1111-111111111111 MC_UUID2=22222222-2222-2222-2222-222222222222 mobileconfig > "$TEST_TMP/locked.mobileconfig"
 if command -v plutil >/dev/null 2>&1; then
 	assert_eq "profile is a valid plist" 0 "$(plutil -lint "$TEST_TMP/open.mobileconfig" >/dev/null 2>&1; echo $?)"
@@ -121,6 +121,8 @@ fi
 assert_eq "DoT host is <id>.<domain>" yes "$(grep -q '<string>kid1.example.duckdns.org</string>' "$TEST_TMP/open.mobileconfig" && echo yes)"
 assert_eq "bootstrap address is included when known" yes "$(grep -q '<string>203.0.113.7</string>' "$TEST_TMP/open.mobileconfig" && echo yes)"
 assert_eq "name is XML-escaped" yes "$(grep -q 'Kid &quot;One&quot; &lt;iPhone&gt; DNS' "$TEST_TMP/open.mobileconfig" && echo yes)"
+assert_eq "failover is allowed when asked" yes "$(grep -q '<key>AllowFailover</key><true/>' "$TEST_TMP/open.mobileconfig" && echo yes)"
+assert_eq "failover is omitted when off" no "$(grep -q AllowFailover "$TEST_TMP/locked.mobileconfig" && echo yes || echo no)"
 assert_eq "open profile is removable" 2 "$(grep -c '<false/>' "$TEST_TMP/open.mobileconfig")"
 assert_eq "locked profile prohibits disablement and removal" 2 "$(grep -c '<true/>' "$TEST_TMP/locked.mobileconfig")"
 assert_eq "no ServerAddresses when the IP is unknown" no "$(grep -q ServerAddresses "$TEST_TMP/locked.mobileconfig" && echo yes || echo no)"

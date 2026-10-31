@@ -340,6 +340,11 @@ return view.extend({
 			return fmt.checkOptional(value, fmt.validPort, _('Expecting a port between 1 and 65535'));
 		};
 
+		o = s.option(form.Flag, 'allow_failover', _('Let iPhones fall back to the network DNS'));
+		o.default = '1';
+		o.rmempty = false;
+		o.description = _('Generated profiles set AllowFailover (iOS 26 and later): if this router is unreachable the iPhone uses the network\'s own DNS instead of losing name resolution. That fallback is the network\'s resolver, so it is not filtered.');
+
 		o = s.option(form.Flag, 'lan_dns', _('Use AdGuard Home for this network\'s DNS'));
 		o.description = fmt.lanDnsDescription();
 		o.default = '0';
