@@ -1,0 +1,7 @@
+#!/bin/sh
+# Seed the config on first install (not a packaged conffile, so upgrades never leave .apk-new).
+[ -e /etc/config/familydns ] || cp /usr/share/familydns/default.config /etc/config/familydns
+chmod 600 /etc/config/familydns
+/etc/init.d/familydns enable >/dev/null 2>&1
+/etc/init.d/familydns restart >/dev/null 2>&1
+exit 0

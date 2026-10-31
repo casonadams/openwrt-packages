@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run every suite for this package. The integration suite needs docker and is skipped without it.
+cd "$(dirname "$0")/.." || exit 1
+
+sh tests/test_unit.sh || exit 1
+node tests/test_ui.js || exit 1
+
+if command -v docker >/dev/null 2>&1; then
+	sh tests/test_integration.sh || exit 1
+else
+	echo "docker not found: skipping tests/test_integration.sh"
+fi

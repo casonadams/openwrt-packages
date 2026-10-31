@@ -11,6 +11,15 @@
         "Makefile"
       ],
       "component": "luci-app-screentime"
+    },
+    "luci-app-familydns": {
+      "release-type": "simple",
+      "component": "luci-app-familydns",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        "Makefile"
+      ]
     }
   }
 }

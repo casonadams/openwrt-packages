@@ -1,0 +1,515 @@
+#!/bin/sh
+# /usr/bin/familydns
+# Backend for luci-app-familydns: per-device AdGuard Home profiles over DNS-over-TLS.
+# Stages (idempotent): ddns -> cert -> agh -> firewall -> clients. `bootstrap` runs them all.
+
+LIB="${FAMILYDNS_LIB:-/usr/share/familydns/lib.sh}"
+# shellcheck source=/dev/null
+. "$LIB"
+
+AGH_DIR="${AGH_DIR:-/etc/adguardhome}"
+ACME_SSL="${ACME_SSL:-/etc/ssl/acme}"
+ACME_STATE="${ACME_STATE:-/etc/acme}"
+STATE_DIR="${STATE_DIR:-/etc/familydns}"
+PROGRESS_FILE="${PROGRESS_FILE:-/tmp/familydns.progress}"
+PID_FILE="${PID_FILE:-/tmp/familydns.pid}"
+LOCK_DIR="${LOCK_DIR:-/tmp/familydns.lock}"
+AGH_DNS_PORT="${AGH_DNS_PORT:-5300}"
+STAGES="ddns cert agh firewall clients"
+UPSTREAM_DNS="1.1.1.1"
+
+setting() {
+	uci_q get "familydns.settings.$1"
+}
+
+domain() { setting domain; }
+dot_port() { setting dot_port || echo 853; }
+web_port() { setting web_port || echo 3001; }
+
+lan_ip() {
+	if [ -n "$AGH_WEB_IP" ]; then
+		echo "$AGH_WEB_IP"
+		return
+	fi
+	ip=$(uci_q get network.lan.ipaddr)
+	echo "${ip%%/*}" | sed 's/^$/192.168.1.1/'
+}
+
+agh_url() { echo "http://$(lan_ip):$(web_port)"; }
+
+agh_auth() {
+	printf 'Authorization: Basic %s' "$(ucode -e "print(b64enc('$(cat "$AGH_DIR/admin.pass")'))")"
+}
+
+agh_get() {
+	wget -qO- -T10 --header="$(agh_auth)" "$(agh_url)$1"
+}
+
+agh_post() {
+	wget -qO- -T20 --header="$(agh_auth)" --header='Content-Type: application/json' --post-data="$2" "$(agh_url)$1"
+}
+
+wait_for() {
+	n=0
+	while [ "$n" -lt "$2" ]; do
+		"$1" && return 0
+		n=$((n + 1))
+		sleep 1
+	done
+	return 1
+}
+
+# --- progress --------------------------------------------------------------
+
+progress_init() {
+	: > "$PROGRESS_FILE"
+	for s in $STAGES; do echo "$s|pending|" >> "$PROGRESS_FILE"; done
+}
+
+progress_set() {
+	awk -F'|' -v OFS='|' -v s="$1" -v st="$2" -v m="$3" '$1 == s {$2 = st; $3 = m} {print}' "$PROGRESS_FILE" > "$PROGRESS_FILE.tmp" &&
+		mv "$PROGRESS_FILE.tmp" "$PROGRESS_FILE"
+}
+
+bootstrap_alive() {
+	[ -r "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+# --- stage: ddns -----------------------------------------------------------
+
+set_opt() {
+	[ "$(uci_q get "$1")" = "$2" ] && return 0
+	uci_q set "$1=$2"
+	TOUCHED="$TOUCHED ${1%%.*}"
+}
+
+set_list() {
+	[ "$(uci_q get "$1")" = "$2" ] && return 0
+	uci_q delete "$1"
+	uci_q add_list "$1=$2"
+	TOUCHED="$TOUCHED ${1%%.*}"
+}
+
+commit_touched() {
+	# shellcheck disable=SC2086
+	for cfg in $(printf '%s\n' $TOUCHED | sort -u); do uci_q commit "$cfg"; done
+}
+
+ensure_duckdns_resolvable() {
+	nslookup www.duckdns.org 127.0.0.1 >/dev/null 2>&1 && return 0
+	rule="/www.duckdns.org/$UPSTREAM_DNS"
+	uci_q get "dhcp.@dnsmasq[0].server" | grep -qF "$rule" ||
+		uci_q add_list "dhcp.@dnsmasq[0].server=$rule"
+	uci_q commit dhcp
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	touch "$STATE_DIR/dnsmasq-workaround"
+	sleep 2
+}
+
+duckdns_update() {
+	reply=$(wget -qO- -T20 "https://www.duckdns.org/update?domains=$1&token=$(setting duckdns_token)&ip=")
+	[ "$reply" = OK ]
+}
+
+validate_settings() {
+	d=$(domain)
+	label=$(duck_label "$d") || { MSG="domain must be a single-label <name>.duckdns.org"; return 1; }
+	[ -n "$(setting duckdns_token)" ] || { MSG="DuckDNS token is empty"; return 1; }
+	case "$(setting email)" in *@*) ;; *) MSG="email is missing"; return 1 ;; esac
+	LABEL=$label
+}
+
+stage_ddns() {
+	TOUCHED=""
+	mkdir -p "$STATE_DIR"
+	set_opt ddns.familydns service
+	set_opt ddns.familydns.enabled 1
+	set_opt ddns.familydns.service_name duckdns.org
+	set_opt ddns.familydns.use_ipv6 0
+	set_opt ddns.familydns.domain "$LABEL"
+	set_opt ddns.familydns.lookup_host "$(domain)"
+	set_opt ddns.familydns.username familydns
+	set_opt ddns.familydns.password "$(setting duckdns_token)"
+	set_opt ddns.familydns.interface wan
+	set_opt ddns.familydns.ip_source network
+	set_opt ddns.familydns.ip_network wan
+	set_opt ddns.familydns.dns_server "$UPSTREAM_DNS"
+	set_opt ddns.familydns.check_interval 10
+	set_opt ddns.familydns.check_unit minutes
+	commit_touched
+	chmod 600 /etc/config/ddns 2>/dev/null
+	ensure_duckdns_resolvable
+	duckdns_update "$LABEL" || { MSG="DuckDNS rejected the update (wrong token or name?)"; return 1; }
+	/etc/init.d/ddns enable >/dev/null 2>&1
+	/etc/init.d/ddns restart >/dev/null 2>&1
+	MSG="record updated"
+}
+
+# --- stage: cert -----------------------------------------------------------
+
+cert_file() { echo "$ACME_SSL/*.$(domain).$1"; }
+
+cert_present() {
+	[ -s "$(cert_file fullchain.crt)" ] && [ -s "$(cert_file key)" ]
+}
+
+ensure_acme_uci() {
+	TOUCHED=""
+	ACME_DIRTY=0
+	before=$(uci_q show acme.familydns 2>/dev/null)
+	uci_q set "acme.@acme[0].account_email=$(setting email)"
+	set_opt acme.familydns cert
+	set_opt acme.familydns.enabled 1
+	set_opt acme.familydns.staging "$(setting staging || echo 0)"
+	set_opt acme.familydns.keylength ec-256
+	set_opt acme.familydns.validation_method dns
+	set_opt acme.familydns.dns dns_duckdns
+	set_opt acme.familydns.dns_wait 60
+	set_list acme.familydns.domains "*.$(domain)"
+	set_list acme.familydns.credentials "DuckDNS_Token=$(setting duckdns_token)"
+	TOUCHED="$TOUCHED acme"
+	commit_touched
+	chmod 600 /etc/config/acme 2>/dev/null
+	[ "$before" = "$(uci_q show acme.familydns 2>/dev/null)" ] || ACME_DIRTY=1
+}
+
+issue_cert() {
+	d=$(domain)
+	rm -rf "$ACME_STATE/*.${d}_ecc"
+	for f in "$ACME_SSL/*.$d".*; do rm -f "$f"; done
+	/etc/init.d/acme restart >/dev/null 2>&1
+	sleep 2
+	/etc/init.d/acme renew >/dev/null 2>&1 &
+	wait_for cert_present 300 || { MSG="certificate was not issued; see: logread -e acme"; return 1; }
+}
+
+install_cert() {
+	mkdir -p "$AGH_DIR/tls"
+	CERT_CHANGED=0
+	cmp -s "$(cert_file fullchain.crt)" "$AGH_DIR/tls/fullchain.pem" || {
+		cp "$(cert_file fullchain.crt)" "$AGH_DIR/tls/fullchain.pem"
+		CERT_CHANGED=1
+	}
+	cmp -s "$(cert_file key)" "$AGH_DIR/tls/privkey.pem" || {
+		cp "$(cert_file key)" "$AGH_DIR/tls/privkey.pem"
+		CERT_CHANGED=1
+	}
+	chmod 700 "$AGH_DIR/tls"
+	chmod 600 "$AGH_DIR/tls/privkey.pem"
+	chown -R adguardhome:adguardhome "$AGH_DIR/tls" 2>/dev/null
+	return 0
+}
+
+stage_cert() {
+	ensure_acme_uci
+	if ! cert_present || [ "$ACME_DIRTY" = 1 ]; then
+		issue_cert || return 1
+	fi
+	install_cert
+	MSG="certificate in place"
+}
+
+# --- stage: agh ------------------------------------------------------------
+
+wizard_up() { wget -qO- -T3 http://127.0.0.1:3000/control/install/get_addresses >/dev/null 2>&1; }
+agh_ready() { [ -r "$AGH_DIR/admin.pass" ] && agh_get /control/status >/dev/null 2>&1; }
+agh_alive() { wizard_up || agh_ready; }
+
+agh_install() {
+	pw=$(head -c 24 /dev/urandom | md5sum | cut -c1-24)
+	body=$(printf '{"web":{"ip":"%s","port":%s},"dns":{"ip":"0.0.0.0","port":%s},"username":"admin","password":"%s"}' \
+		"$(lan_ip)" "$(web_port)" "$AGH_DNS_PORT" "$pw")
+	wget -qO- -T15 --header='Content-Type: application/json' --post-data="$body" \
+		http://127.0.0.1:3000/control/install/configure >/dev/null 2>&1 || { MSG="AdGuard Home setup call failed"; return 1; }
+	(umask 077 && printf 'admin:%s\n' "$pw" > "$AGH_DIR/admin.pass")
+}
+
+tls_body() {
+	printf '{"enabled":true,"server_name":"%s","force_https":false,"port_https":0,"port_dns_over_tls":%s,"port_dns_over_quic":0,"allow_unencrypted_doh":false,"certificate_path":"%s/tls/fullchain.pem","private_key_path":"%s/tls/privkey.pem"}' \
+		"$(domain)" "$(dot_port)" "$AGH_DIR" "$AGH_DIR"
+}
+
+tls_current() {
+	agh_get /control/tls/status | jsonfilter -e '@.enabled' -e '@.server_name' -e '@.port_dns_over_tls' -e '@.certificate_path' | tr '\n' ' '
+}
+
+tls_wanted() {
+	echo "true $(domain) $(dot_port) $AGH_DIR/tls/fullchain.pem "
+}
+
+ensure_tls() {
+	if [ "$(tls_current)" != "$(tls_wanted)" ]; then
+		agh_post /control/tls/configure "$(tls_body)" >/dev/null || { MSG="TLS configuration was rejected"; return 1; }
+	elif [ "$CERT_CHANGED" = 1 ]; then
+		/etc/init.d/adguardhome restart >/dev/null 2>&1
+		wait_for agh_ready 30
+	fi
+}
+
+stage_agh() {
+	/etc/init.d/adguardhome enable >/dev/null 2>&1
+	if ! agh_alive; then
+		/etc/init.d/adguardhome start >/dev/null 2>&1
+		wait_for agh_alive 30 || { MSG="AdGuard Home did not start"; return 1; }
+	fi
+	if wizard_up; then agh_install || return 1; fi
+	wait_for agh_ready 30 || { MSG="AdGuard Home API did not come up"; return 1; }
+	ensure_tls || return 1
+	MSG="DoT enabled"
+}
+
+# --- stage: firewall -------------------------------------------------------
+
+stage_firewall() {
+	TOUCHED=""
+	set_opt firewall.familydns_dot rule
+	set_opt firewall.familydns_dot.name Allow-DoT-FamilyDNS
+	set_opt firewall.familydns_dot.src wan
+	set_opt firewall.familydns_dot.proto tcp
+	set_opt firewall.familydns_dot.dest_port "$(dot_port)"
+	set_opt firewall.familydns_dot.target ACCEPT
+	if [ -n "$TOUCHED" ]; then
+		commit_touched
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+	MSG="WAN port $(dot_port) open"
+}
+
+# --- stage: clients --------------------------------------------------------
+
+device_sections() {
+	uci_q show familydns | sed -n 's/^familydns\.\(@device\[[0-9]*\]\)=device$/\1/p'
+}
+
+agh_client_names() {
+	agh_get /control/clients | jsonfilter -e '@.clients[*].ids[0]'
+}
+
+agh_client_name_for() {
+	agh_get /control/clients | jsonfilter -e "@.clients[@.ids[0]='$1'].name"
+}
+
+managed_file() { echo "$STATE_DIR/managed"; }
+
+delete_client() {
+	name=$(agh_client_name_for "$1")
+	[ -z "$name" ] || agh_post /control/clients/delete "$(printf '{"name":"%s"}' "$(json_escape "$name")")" >/dev/null
+}
+
+stage_clients() {
+	mkdir -p "$STATE_DIR"
+	touch "$(managed_file)"
+	wanted=""
+	for sec in $(device_sections); do
+		id=$(uci_q get "familydns.$sec.client_id")
+		valid_client_id "$id" || { MSG="device '$id' has an invalid client id"; return 1; }
+		wanted="$wanted $id"
+		existing=$(agh_client_name_for "$id")
+		if [ -n "$existing" ]; then
+			body=$(printf '{"name":"%s","data":%s}' "$(json_escape "$existing")" "$(client_json "$sec")")
+			agh_post /control/clients/update "$body" >/dev/null
+		else
+			agh_post /control/clients/add "$(client_json "$sec")" >/dev/null
+		fi || { MSG="could not apply client '$id'"; return 1; }
+		grep -qx "$id" "$(managed_file)" || echo "$id" >> "$(managed_file)"
+	done
+	stale=$(awk -v w=" $wanted " 'index(w, " " $0 " ") == 0' "$(managed_file)")
+	for id in $stale; do delete_client "$id"; done
+	: > "$(managed_file)"
+	for id in $wanted; do echo "$id" >> "$(managed_file)"; done
+	MSG="devices applied"
+}
+
+# --- orchestration ---------------------------------------------------------
+
+run_stage() {
+	progress_set "$1" running ""
+	MSG=""
+	if "stage_$1"; then
+		progress_set "$1" ok "$MSG"
+	else
+		progress_set "$1" error "$MSG"
+		return 1
+	fi
+}
+
+bootstrap_run() {
+	progress_init
+	echo $$ > "$PID_FILE"
+	validate_settings || { progress_set ddns error "$MSG"; return 1; }
+	mkdir -p "$STATE_DIR"
+	for s in $STAGES; do run_stage "$s" || return 1; done
+	touch "$STATE_DIR/configured"
+}
+
+cmd_bootstrap() {
+	if [ "$1" = --background ]; then
+		bootstrap_alive && { echo "already running"; return 0; }
+		(bootstrap_run >/dev/null 2>&1 &)
+		echo "started"
+		return 0
+	fi
+	bootstrap_run
+}
+
+cmd_sync() {
+	[ -e "$STATE_DIR/configured" ] || { echo "not set up"; return 0; }
+	wait_for agh_ready 10 || { echo "AdGuard Home not ready"; return 1; }
+	stage_clients && echo "$MSG"
+}
+
+cmd_reconcile() {
+	[ -e "$STATE_DIR/configured" ] || return 0
+	mkdir "$LOCK_DIR" 2>/dev/null || return 0
+	trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+	CERT_CHANGED=0
+	validate_settings || return 1
+	cert_present && install_cert
+	agh_ready || /etc/init.d/adguardhome start >/dev/null 2>&1
+	wait_for agh_ready 30 && ensure_tls
+	stage_firewall
+	stage_clients
+}
+
+cmd_profile() {
+	id=$1
+	for sec in $(device_sections); do
+		[ "$(uci_q get "familydns.$sec.client_id")" = "$id" ] || continue
+		MC_NAME=$(uci_q get "familydns.$sec.name")
+		MC_CLIENT_ID=$id
+		MC_DOMAIN=$(domain)
+		MC_IP=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
+		MC_LOCK=0
+		[ "$2" = --lock ] && MC_LOCK=1
+		MC_UUID1=$(new_uuid)
+		MC_UUID2=$(new_uuid)
+		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_UUID1 MC_UUID2
+		mobileconfig
+		return 0
+	done
+	echo "unknown client id '$id'" >&2
+	return 1
+}
+
+cmd_teardown() {
+	/etc/init.d/familydns stop >/dev/null 2>&1
+	uci_q delete firewall.familydns_dot && uci_q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1
+	uci_q delete ddns.familydns && uci_q commit ddns && /etc/init.d/ddns restart >/dev/null 2>&1
+	uci_q delete acme.familydns && uci_q commit acme
+	if [ -e "$STATE_DIR/dnsmasq-workaround" ]; then
+		uci_q del_list "dhcp.@dnsmasq[0].server=/www.duckdns.org/$UPSTREAM_DNS"
+		uci_q commit dhcp
+		/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	fi
+	while read -r id; do delete_client "$id"; done < "$(managed_file)" 2>/dev/null
+	rm -rf "$STATE_DIR" "$PROGRESS_FILE" "$PID_FILE"
+	echo "removed"
+}
+
+# --- status ----------------------------------------------------------------
+
+stage_json() {
+	first=1
+	printf '['
+	while IFS='|' read -r name state msg; do
+		[ -n "$name" ] || continue
+		[ "$first" = 1 ] || printf ','
+		first=0
+		printf '{"name":"%s","state":"%s","message":"%s"}' "$name" "$state" "$(json_escape "$msg")"
+	done < "$PROGRESS_FILE"
+	printf ']'
+}
+
+progress_overall() {
+	[ -s "$PROGRESS_FILE" ] || { echo idle; return; }
+	if grep -q '|error|' "$PROGRESS_FILE"; then echo error
+	elif grep -q '|running|' "$PROGRESS_FILE"; then bootstrap_alive && echo running || echo error
+	elif grep -q '|pending|' "$PROGRESS_FILE"; then echo idle
+	else echo ok; fi
+}
+
+progress_json() {
+	state=$(progress_overall)
+	running=false
+	[ "$state" = running ] && running=true
+	msg=$(awk -F'|' '$2 == "error" || $2 == "running" {print $3; exit}' "$PROGRESS_FILE" 2>/dev/null)
+	[ -s "$PROGRESS_FILE" ] || : > "$PROGRESS_FILE"
+	printf '{"running":%s,"state":"%s","message":"%s","stages":' "$running" "$state" "$(json_escape "$msg")"
+	stage_json
+	printf '}'
+}
+
+json_or_null() {
+	if [ -n "$1" ]; then printf '"%s"' "$(json_escape "$1")"; else printf null; fi
+}
+
+bool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
+
+devices_json() {
+	ids=$(agh_client_names 2>/dev/null | tr '\n' ' ')
+	first=1
+	printf '['
+	for sec in $(device_sections); do
+		id=$(uci_q get "familydns.$sec.client_id")
+		[ "$first" = 1 ] || printf ','
+		first=0
+		in_agh=false
+		case " $ids " in *" $id "*) in_agh=true ;; esac
+		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","in_agh":%s}' \
+			"$(json_escape "$(uci_q get "familydns.$sec.name")")" "$(json_escape "$id")" \
+			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")" "$in_agh"
+	done
+	printf ']'
+}
+
+cmd_status() {
+	wan=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	ddns=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
+	ddns_ok=false
+	[ -n "$wan" ] && [ "$wan" = "$ddns" ] && ddns_ok=true
+	tls=$(agh_get /control/tls/status 2>/dev/null)
+	not_after=$(printf '%s' "$tls" | jsonfilter -e '@.not_after' 2>/dev/null)
+	days=""
+	[ -n "$not_after" ] && days=$(days_until "$not_after" "$(date +%Y-%m-%d)")
+	version=$(agh_get /control/status 2>/dev/null | jsonfilter -e '@.version')
+	staging=false
+	[ "$(setting staging)" = 1 ] && staging=true
+	configured=false
+	[ -e "$STATE_DIR/configured" ] && [ "$(setting enabled)" = 1 ] && configured=true
+	fw=false
+	[ "$(uci_q get firewall.familydns_dot)" = rule ] && fw=true
+
+	printf '{"configured":%s,"domain":"%s","wan_ip":%s,"ddns_ip":%s,"ddns_ok":%s,' \
+		"$configured" "$(json_escape "$(domain)")" "$(json_or_null "$wan")" "$(json_or_null "$ddns")" "$ddns_ok"
+	printf '"cert":{"present":%s,"not_after":%s,"days_left":%s,"staging":%s},' \
+		"$(bool cert_present)" "$(json_or_null "$not_after")" "${days:-null}" "$staging"
+	printf '"agh":{"running":%s,"version":%s,"dot_listening":%s,"admin_url":"%s"},' \
+		"$(bool pidof AdGuardHome)" "$(json_or_null "$version")" \
+		"$(bool sh -c "netstat -ltn 2>/dev/null | grep -q ':$(dot_port) '")" "$(agh_url)"
+	printf '"firewall_open":%s,"progress":' "$fw"
+	progress_json
+	printf ',"devices":'
+	devices_json
+	printf '}\n'
+}
+
+case "$1" in
+	status)    cmd_status ;;
+	bootstrap) shift; cmd_bootstrap "$@" ;;
+	sync)      cmd_sync ;;
+	reconcile) cmd_reconcile ;;
+	profile)   shift; cmd_profile "$@" ;;
+	teardown)  cmd_teardown ;;
+	*)
+		cat <<EOF
+Usage: familydns <command>
+
+  status [--json]            Setup state, certificate, AdGuard Home and devices
+  bootstrap [--background]   Set up DDNS, certificate, AdGuard Home, firewall and devices
+  sync                       Apply devices and profiles to AdGuard Home now
+  reconcile                  Repair drift (cron hourly and on config change)
+  profile <id> [--lock]      Print an Apple DNS-over-TLS .mobileconfig for a device
+  teardown                   Remove what bootstrap set up (AdGuard Home itself stays)
+EOF
+		;;
+esac
