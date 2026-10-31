@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.1.0...luci-app-screentime-v1.2.0) (2026-10-31)
+
+
+### Features
+
+* **packaging:** sign packages and the feed index ([7313dc2](https://github.com/casonadams/openwrt-packages/commit/7313dc2279b074e82431d1e94d128a59a918252b))
+* **packaging:** sign packages and the feed index ([63e5ecd](https://github.com/casonadams/openwrt-packages/commit/63e5ecdc72990c87ff8a740d7f2bdf052c39260c))
+
 ## [1.1.0](https://github.com/casonadams/openwrt-packages/compare/v1.0.0...v1.1.0) (2026-10-31)
 
 
