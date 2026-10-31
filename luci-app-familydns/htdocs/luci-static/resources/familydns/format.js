@@ -159,6 +159,13 @@ function slugify(name) {
 		.replace(/-+$/, '');
 }
 
+// LuCI validates blank optional fields, blank list entries and freshly added table rows, so a
+// validator must accept empty input; required-ness is enforced by the engine and the Set up button.
+function checkOptional(value, isValid, message) {
+	const text = Array.isArray(value) ? value.join('') : String(value == null ? '' : value);
+	return text.trim() === '' || isValid(text) ? true : message;
+}
+
 function validDomain(domain) {
 	return DOMAIN_RE.test(String(domain || ''));
 }
@@ -248,6 +255,7 @@ return baseclass.extend({
 	isRunning: isRunning,
 	validClientId: validClientId,
 	slugify: slugify,
+	checkOptional: checkOptional,
 	validDomain: validDomain,
 	validEmail: validEmail,
 	validPort: validPort,

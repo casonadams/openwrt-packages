@@ -126,6 +126,13 @@ function badge(text, kind) {
 }
 
 return view.extend({
+	// Stock handleSave stages the changes; only flag blank-row pruning for this save, because
+	// the table's Add button also saves the map and must not discard the new blank row.
+	handleSave: function(ev) {
+		this.pruneBlank = true;
+		return view.prototype.handleSave.call(this, ev).finally(function() { this.pruneBlank = false; }.bind(this));
+	},
+
 	load: function() {
 		return Promise.all([
 			uci.load('familydns'),
@@ -253,6 +260,7 @@ return view.extend({
 
 		let m, s, o;
 		let clientOpt = null;
+		let nameOpt = null;
 
 		m = new form.Map('familydns', _('Family DNS'),
 			_('Give each family device its own AdGuard Home profile over DNS-over-TLS, reachable from anywhere.'));
@@ -272,19 +280,19 @@ return view.extend({
 
 		o = s.option(form.Value, 'domain', _('DuckDNS domain'));
 		o.placeholder = 'example.duckdns.org';
-		o.required = true;
+		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			return fmt.validDomain(value) ? true : _('Must be a name ending in .duckdns.org');
+			return fmt.checkOptional(value, fmt.validDomain, _('Must be a name ending in .duckdns.org'));
 		};
 
 		o = s.option(form.Value, 'duckdns_token', _('DuckDNS token'));
 		o.password = true;
-		o.required = true;
+		o.rmempty = true;
 
 		o = s.option(form.Value, 'email', _('Email (TLS account)'));
-		o.required = true;
+		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			return fmt.validEmail(value) ? true : _('Expecting an email address');
+			return fmt.checkOptional(value, fmt.validEmail, _('Expecting an email address'));
 		};
 
 		o = s.option(form.Flag, 'staging', _('Staging certificate'));
@@ -294,7 +302,7 @@ return view.extend({
 		o.placeholder = DEFAULT_PORT;
 		o.default = DEFAULT_PORT;
 		o.validate = function(_section_id, value) {
-			return fmt.validPort(value) ? true : _('Expecting a port between 1 and 65535');
+			return fmt.checkOptional(value, fmt.validPort, _('Expecting a port between 1 and 65535'));
 		};
 
 		o = s.option(form.Flag, 'lan_dns', _('Use AdGuard Home for this network\'s DNS'));
@@ -311,7 +319,7 @@ return view.extend({
 		o.placeholder = 'https://dns10.quad9.net/dns-query';
 		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			return fmt.validUpstream(value) ? true : _('Enter one server per entry, without spaces');
+			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
 		};
 
 		o = s.option(form.DummyValue, '_setup', _('Setup'));
@@ -333,7 +341,7 @@ return view.extend({
 		s.modaltitle = _('Family DNS Profile');
 
 		o = s.option(form.Value, 'name', _('Name'));
-		o.required = true;
+		o.rmempty = true;
 
 		o = s.option(form.Flag, 'filtering', _('Ad blocking'));
 		o.default = '1';
@@ -364,6 +372,21 @@ return view.extend({
 		s.anonymous = true;
 		s.addremove = true;
 
+		// Rows added with "Add" but left blank are dropped on a user-initiated Save.
+		s.parse = function() {
+			const nameField = this.children.find(function(c) { return c.option === 'name'; });
+			const idField = this.children.find(function(c) { return c.option === 'client_id'; });
+			const tasks = [];
+			this.cfgsections().forEach(function(sid) {
+				if (!nameField.formvalue(sid) && !idField.formvalue(sid)) {
+					if (self.pruneBlank) this.map.data.remove('familydns', sid);
+					return;
+				}
+				this.children.forEach(function(c) { tasks.push(c.parse(sid)); });
+			}, this);
+			return Promise.all(tasks);
+		};
+
 		const otherClientIds = function(section_id) {
 			return clientOpt.section.cfgsections()
 				.filter(function(sid) { return sid !== section_id; })
@@ -372,7 +395,8 @@ return view.extend({
 
 		o = s.option(form.Value, 'name', _('Device name'));
 		o.placeholder = _('Kid 1 iPhone');
-		o.required = true;
+		o.rmempty = true;
+		nameOpt = o;
 		o.onchange = function(_ev, section_id, value) {
 			const node = clientOpt ? o.map.findElement('id', clientOpt.cbid(section_id)) : null;
 			if (node && !node.value) {
@@ -383,21 +407,24 @@ return view.extend({
 
 		clientOpt = s.option(form.Value, 'client_id', _('Client ID'));
 		clientOpt.placeholder = 'kid1';
-		clientOpt.required = true;
+		clientOpt.rmempty = false;
+		clientOpt.write = function(section_id, value) {
+			return uci.set('familydns', section_id, 'client_id', value || fmt.slugify(nameOpt.formvalue(section_id)));
+		};
 		clientOpt.validate = function(section_id, value) {
-			if (!fmt.validClientId(value))
-				return _('Use 1-63 lowercase letters, digits or dashes; no leading or trailing dash');
-			if (fmt.isDuplicate(value, otherClientIds(section_id)))
+			const problem = fmt.checkOptional(value, fmt.validClientId, _('Use 1-63 lowercase letters, digits or dashes; no leading or trailing dash'));
+			if (problem !== true)
+				return problem;
+			if (value && fmt.isDuplicate(value, otherClientIds(section_id).filter(Boolean)))
 				return _('Another device already uses this client ID');
 			return true;
 		};
 
 		o = s.option(form.ListValue, 'profile', _('Profile'));
-		o.required = true;
 		o.default = profileIds[0] || '';
 		profiles.forEach(function(p) { o.value(p.id, p.label); });
 		o.validate = function(_section_id, value) {
-			return profileIds.indexOf(value) >= 0 ? true : _('Choose an existing profile');
+			return fmt.checkOptional(value, function(v) { return profileIds.indexOf(v) >= 0; }, _('Choose an existing profile'));
 		};
 
 		o = s.option(form.Value, 'lan_ip', _('LAN address'));

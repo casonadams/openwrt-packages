@@ -227,5 +227,24 @@ check('admin JSON rejects missing password', fmt.parseAdminJson('{"url":"http://
 check('admin JSON rejects empty password', fmt.parseAdminJson('{"url":"http://a:3001","username":"admin","password":""}'), null);
 check('admin JSON rejects non-string username', fmt.parseAdminJson('{"url":"http://a:3001","username":1,"password":"p"}'), null);
 
+
+console.log('-> validators accept empty input');
+const viewSource = fs.readFileSync(path.join(__dirname, '..',
+	'htdocs/luci-static/resources/view/familydns/overview.js'), 'utf8');
+const validators = viewSource.split(/\.validate = function/).slice(1);
+check('the view defines validators', validators.length > 0, true);
+validators.forEach(function(block, i) {
+	const body = block.slice(0, 600);
+	check('validator #' + (i + 1) + ' accepts blank input', /checkOptional\(|!value|!fmt\.|=== ''/.test(body), true);
+});
+check('no option is marked required (blank rows and defaults must save)', /\.required = true/.test(viewSource), false);
+
+check('checkOptional accepts an empty string', fmt.checkOptional('', function() { return false; }, 'bad'), true);
+check('checkOptional accepts whitespace only', fmt.checkOptional('  ', function() { return false; }, 'bad'), true);
+check('checkOptional accepts an empty list', fmt.checkOptional([], function() { return false; }, 'bad'), true);
+check('checkOptional accepts null', fmt.checkOptional(null, function() { return false; }, 'bad'), true);
+check('checkOptional rejects a bad value', fmt.checkOptional('a b', fmt.validUpstream, 'bad'), 'bad');
+check('checkOptional accepts a good value', fmt.checkOptional('tls://one.one.one.one', fmt.validUpstream, 'bad'), true);
+
 console.log('==========================================');
 console.log(' UI results: ' + passed + ' passed');

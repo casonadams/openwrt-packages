@@ -22,6 +22,7 @@ luci-app-familydns/
 
 ## Rules
 
+- Form validation rules (blank input, no `required`, pruning blank rows) are in the root `AGENTS.md` section 5; `tests/test_ui.js` enforces them.
 - **Engine = POSIX shell (BusyBox ash)**, `shellcheck -x -s sh` clean. Pure helpers (escaping, ids, client JSON, profile XML, date maths) live in `lib.sh` and are unit-tested; stage code in `bin/familydns` is tested against a real AdGuard Home in a container.
 - **Stages are idempotent**: `ddns -> cert -> agh -> firewall -> clients`. Each prints one `MSG`, records progress in `/tmp/familydns.progress`, and may be re-run any time (`reconcile` re-runs the cheap ones hourly).
 - **AdGuard Home is configured only through its own API** (`/control/install/configure`, `/control/tls/configure`, `/control/clients/*`), never by editing its YAML. The wizard owns port 3000, so the admin UI uses `web_port` (3001) on the LAN address; plain DNS is on 5300; DoT on `dot_port`; HTTPS/DoH is disabled (`port_https` 0) so the admin UI is never exposed on the WAN.
