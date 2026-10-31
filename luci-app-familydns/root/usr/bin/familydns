@@ -240,6 +240,8 @@ tls_wanted() {
 ensure_tls() {
 	if [ "$(tls_current)" != "$(tls_wanted)" ]; then
 		agh_post /control/tls/configure "$(tls_body)" >/dev/null || { MSG="TLS configuration was rejected"; return 1; }
+		sleep 2
+		wait_for agh_ready 30 || { MSG="AdGuard Home did not come back after the TLS change"; return 1; }
 	elif [ "$CERT_CHANGED" = 1 ]; then
 		/etc/init.d/adguardhome restart >/dev/null 2>&1
 		wait_for agh_ready 30
@@ -297,6 +299,10 @@ delete_client() {
 }
 
 stage_clients() {
+	if ! wait_for agh_ready 30 || ! agh_get /control/clients >/dev/null; then
+		MSG="could not read AdGuard Home clients"
+		return 1
+	fi
 	mkdir -p "$STATE_DIR"
 	touch "$(managed_file)"
 	wanted=""
@@ -345,7 +351,8 @@ bootstrap_run() {
 cmd_bootstrap() {
 	if [ "$1" = --background ]; then
 		bootstrap_alive && { echo "already running"; return 0; }
-		(bootstrap_run >/dev/null 2>&1 &)
+		"$0" bootstrap >/dev/null 2>&1 &
+		echo $! > "$PID_FILE"
 		echo "started"
 		return 0
 	fi
