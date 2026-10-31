@@ -339,8 +339,15 @@ agh_listening() {
 	netstat -lun 2>/dev/null | grep -q ":$AGH_DNS_PORT "
 }
 
+lan_profile() {
+	p=$(setting lan_profile)
+	echo "${p:-adult}"
+}
+
+# Upstreams for the whole network: the network profile's, else the global setting, else what AdGuard Home has.
 dns_config_body() {
-	ups=$(setting upstream)
+	ups=$(uci_q get "familydns.$(lan_profile).upstream")
+	[ -n "$ups" ] || ups=$(setting upstream)
 	[ -n "$ups" ] || ups=$(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | tr '\n' ' ')
 	rule="[/$(lan_domain)/]127.0.0.1:53"
 	case " $ups " in *" $rule "*) ;; *) ups="$ups $rule" ;; esac
@@ -356,8 +363,7 @@ agh_switch() {
 }
 
 apply_global_profile() {
-	p=$(setting lan_profile)
-	p=${p:-adult}
+	p=$(lan_profile)
 	if [ -z "$(uci_q get "familydns.$p")" ]; then
 		MSG="network profile '$p' does not exist"
 		return 1

@@ -85,12 +85,16 @@ client_json() {
 	for svc in $(uci_q get "familydns.$prof.blocked_services"); do
 		services="$services${services:+,}\"$(json_escape "$svc")\""
 	done
+	upstreams=""
+	for up in $(uci_q get "familydns.$prof.upstream"); do
+		upstreams="$upstreams${upstreams:+,}\"$(json_escape "$up")\""
+	done
 	use_global=true
 	[ -n "$services" ] && use_global=false
 	ids="\"$(json_escape "$id")\""
 	lan=$(uci_q get "familydns.$sec.lan_ip")
 	if [ -n "$lan" ] && valid_lan_id "$lan"; then ids="$ids,\"$(json_escape "$lan")\""; fi
-	printf '{"name":"%s","ids":[%s],"tags":[],"upstreams":[],' "$(json_escape "$name")" "$ids"
+	printf '{"name":"%s","ids":[%s],"tags":[],"upstreams":[%s],' "$(json_escape "$name")" "$ids" "$upstreams"
 	printf '"filtering_enabled":%s,"parental_enabled":%s,"safebrowsing_enabled":%s,"safesearch_enabled":%s,' \
 		"$(profile_flag "$prof" filtering)" "$(profile_flag "$prof" parental)" "$(profile_flag "$prof" safebrowsing)" "$ss"
 	printf '"safe_search":{"enabled":%s,"bing":%s,"duckduckgo":%s,"ecosia":%s,"google":%s,"pixabay":%s,"yandex":%s,"youtube":%s},' \

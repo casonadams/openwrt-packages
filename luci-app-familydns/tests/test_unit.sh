@@ -28,6 +28,7 @@ familydns.kids.safe_search=1
 familydns.kids.parental=1
 familydns.kids.safebrowsing=1
 familydns.kids.blocked_services=tiktok roblox
+familydns.kids.upstream=https://doh.cleanbrowsing.org/doh/family-filter/ tls://one.one.one.one
 familydns.adult=profile
 familydns.adult.name=Adult
 familydns.adult.filtering=1
@@ -101,6 +102,8 @@ assert_eq "kids profile turns on safe search" true "$(json_get "$kid" safe_searc
 assert_eq "kids profile turns on parental" true "$(json_get "$kid" parental_enabled)"
 assert_eq "kids profile blocks services" '["tiktok","roblox"]' "$(json_get "$kid" blocked_services)"
 assert_eq "kids profile stops using global blocked services" false "$(json_get "$kid" use_global_blocked_services)"
+assert_eq "kids profile carries its own upstreams" '["https://doh.cleanbrowsing.org/doh/family-filter/","tls://one.one.one.one"]' "$(json_get "$kid" upstreams)"
+assert_eq "a profile without upstreams leaves the client on the defaults" '[]' "$(json_get "$dad" upstreams)"
 assert_eq "adult profile keeps filtering" true "$(json_get "$dad" filtering_enabled)"
 assert_eq "adult profile leaves parental off" false "$(json_get "$dad" parental_enabled)"
 assert_eq "adult profile uses global blocked services" true "$(json_get "$dad" use_global_blocked_services)"

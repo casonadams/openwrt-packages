@@ -19,6 +19,9 @@ setup)
 	uci set familydns.settings.domain=test.duckdns.org
 	uci set familydns.settings.duckdns_token=unused
 	uci set familydns.settings.email=ci@example.com
+	uci -q delete familydns.kids.upstream
+	uci -q delete familydns.adult.upstream
+	uci add_list familydns.kids.upstream=1.0.0.1
 	for d in "Kid One|kid1|kids" "Dad|dad|adult"; do
 		IFS='|' read -r n i p <<EOT
 $d
@@ -80,6 +83,8 @@ querylog)
 	load_engine
 	agh_get '/control/querylog?limit=20' | jsonfilter -e '@.data[*].client_id' | tr '\n' ' '
 	echo
+	echo "kid1 upstream: $(agh_get '/control/querylog?limit=20&search=example.com' | jsonfilter -e '@.data[@.client_id="kid1"].upstream' | head -1)"
+	echo "dad upstream: $(agh_get '/control/querylog?limit=20&search=example.org' | jsonfilter -e '@.data[@.client_id="dad"].upstream' | head -1)"
 	;;
 resync)
 	load_engine

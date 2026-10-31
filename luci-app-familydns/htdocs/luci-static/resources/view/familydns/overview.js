@@ -402,6 +402,15 @@ return view.extend({
 		});
 		fmt.serviceOptions(storedServices).forEach(function(svc) { o.value(svc.id, svc.label); });
 
+		o = s.option(form.DynamicList, 'upstream', _('DNS servers (optional)'));
+		o.modalonly = true;
+		o.rmempty = true;
+		o.placeholder = 'https://doh.cleanbrowsing.org/doh/family-filter/';
+		o.description = _('Devices using this profile resolve through these upstreams (DoH, DoT, DoQ or plain IP), one per entry. Leave empty to use the AdGuard Home defaults.');
+		o.validate = function(_section_id, value) {
+			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
+		};
+
 		s = m.section(form.TableSection, 'device', _('Devices'),
 			_('Only listed devices get their own profile; all other traffic is untouched.'));
 		s.anonymous = true;

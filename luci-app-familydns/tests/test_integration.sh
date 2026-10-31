@@ -37,9 +37,13 @@ echo "-> DNS-over-TLS with per-device hostnames"
 assert_eq "tracker is blocked for kid1" 0.0.0.0 "$(python3 "$SCRIPT_DIR/dot_query.py" "$PORT" kid1.test.duckdns.org doubleclick.net "$TMP/ca.crt")"
 assert_eq "tracker is blocked for dad" 0.0.0.0 "$(python3 "$SCRIPT_DIR/dot_query.py" "$PORT" dad.test.duckdns.org doubleclick.net "$TMP/ca.crt")"
 assert_eq "an unknown device name still gets DNS" yes "$([ -n "$(python3 "$SCRIPT_DIR/dot_query.py" "$PORT" stranger.test.duckdns.org example.com "$TMP/ca.crt")" ] && echo yes)"
+python3 "$SCRIPT_DIR/dot_query.py" "$PORT" kid1.test.duckdns.org example.com "$TMP/ca.crt" >/dev/null
+python3 "$SCRIPT_DIR/dot_query.py" "$PORT" dad.test.duckdns.org example.org "$TMP/ca.crt" >/dev/null
 log=$(in_container querylog)
 assert_eq "query log attributes queries to kid1" yes "$(echo "$log" | grep -qw kid1 && echo yes)"
 assert_eq "query log attributes queries to dad" yes "$(echo "$log" | grep -qw dad && echo yes)"
+assert_eq "kid1 resolves through its profile's own upstream" "kid1 upstream: 1.0.0.1:53" "$(echo "$log" | grep '^kid1 upstream')"
+assert_eq "dad (no profile upstream) uses the global upstream" "dad upstream: 1.1.1.1:53" "$(echo "$log" | grep '^dad upstream')"
 
 echo "-> Network-wide DNS through AdGuard Home"
 lan=$(in_container lan)
