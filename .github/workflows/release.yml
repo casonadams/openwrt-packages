@@ -14,9 +14,9 @@ jobs:
     name: "Release Please"
     runs-on: ubuntu-latest
     outputs:
-      pr: ${{ steps.release.outputs.pr }}
       releases_created: ${{ steps.release.outputs.releases_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+      all: ${{ toJSON(steps.release.outputs) }}
     steps:
       - uses: googleapis/release-please-action@v5
         id: release
@@ -24,46 +24,26 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   build-release:
-    name: "Build Packages"
+    name: "Build ${{ matrix.path }}"
     needs: release-please
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        path: ${{ fromJSON(needs.release-please.outputs.paths_released) }}
     env:
-      TAG: ${{ needs.release-please.outputs.tag_name }}
+      TAG: ${{ fromJSON(needs.release-please.outputs.all)[format('{0}--tag_name', matrix.path)] }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ env.TAG }}
 
-      - name: Build APK Packages
-        run: |
-          version="${TAG##*v}"
-          export VERSION="${version}-r1"
-          chmod +x scripts/build-apk.sh
-          ./scripts/build-apk.sh
+      - name: Build APK package
+        run: ./scripts/build-apk.sh "${{ matrix.path }}"
 
-      - name: Upload Release Packages
-        run: |
-          gh release upload "$TAG" dist/*.apk --clobber
-
-  checksums:
-    name: "Generate SHA256SUMS"
-    needs: [release-please, build-release]
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
-    runs-on: ubuntu-latest
-    env:
-      TAG: ${{ needs.release-please.outputs.tag_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Download release assets
-        run: |
-          mkdir -p dist
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist --pattern "*.apk" --clobber
-
-      - name: Generate and upload SHA256SUMS
+      - name: Upload release assets
         run: |
           cd dist
-          rm -f SHA256SUMS
           sha256sum -- *.apk > SHA256SUMS
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" SHA256SUMS --clobber
+          gh release upload "$TAG" -- *.apk SHA256SUMS --clobber

@@ -21,50 +21,18 @@ jobs:
 
       - name: ShellCheck Lint
         run: |
-          shellcheck -s sh \
-            luci-app-screentime/root/usr/bin/screentime \
-            luci-app-screentime/root/etc/init.d/screentime \
-            luci-app-screentime/root/etc/uci-defaults/99_screentime \
-            luci-app-screentime/root/etc/hotplug.d/ntp/99-screentime \
-            luci-app-screentime/prerm \
-            luci-app-screentime/postinst \
-            install.sh \
-            scripts/build-apk.sh \
-            scripts/generate-pages.sh \
-            tests/lib.sh \
-            tests/test_engine.sh \
-            tests/test_integration.sh
+          git ls-files -z | xargs -0 grep -lE '^#!/bin/sh' | xargs shellcheck -x -s sh
 
       - name: JavaScript & JSON Syntax Check
         run: |
-          node --check luci-app-screentime/htdocs/luci-static/resources/view/screentime/overview.js
-          node --check luci-app-screentime/htdocs/luci-static/resources/screentime/format.js
-          node -e '
-          const fs = require("fs");
-          const files = [
-            "luci-app-screentime/root/usr/share/luci/menu.d/luci-app-screentime.json",
-            "luci-app-screentime/root/usr/share/rpcd/acl.d/luci-app-screentime.json",
-            "release-please-config.json",
-            ".release-please-manifest.json"
-          ];
-          for (const file of files) {
-            JSON.parse(fs.readFileSync(file, "utf8"));
-          }
-          console.log("All JSON files valid.");
-          '
+          git ls-files 'luci-app-*/htdocs/*.js' | xargs -n1 node --check
+          git ls-files '*.json' | xargs -n1 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))'
 
-      - name: Run Engine Test Suite
+      - name: Run package tests
         run: |
-          chmod +x tests/test_engine.sh
-          ./tests/test_engine.sh
-
-      - name: Run UI Test Suite
-        run: node tests/test_ui.js
-
-      - name: Run Integration Tests (real uci and nft)
-        run: |
-          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w \
-            openwrt/rootfs:x86-64-24.10.2 sh tests/test_integration.sh
+          for suite in luci-app-*/tests/run.sh; do
+            sh "$suite" || exit 1
+          done
 
   build:
     name: Build APK Packages

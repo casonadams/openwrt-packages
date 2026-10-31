@@ -1,13 +1,13 @@
 #!/bin/sh
+# shellcheck source-path=SCRIPTDIR
 # Integration test: the real engine against the real uci and nft binaries. Run inside an
 # OpenWrt rootfs container with NET_ADMIN (see .github/workflows/build.yml):
 #   docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w openwrt/rootfs:x86-64-24.10.2 \
-#     sh tests/test_integration.sh
+#     sh tests/test_integration.sh      (from this package directory)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=tests/lib.sh
+PKG="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
-PKG="$REPO_ROOT/luci-app-screentime"
 
 for tool in uci nft; do
 	command -v "$tool" >/dev/null 2>&1 || { echo "$tool not found; run inside an OpenWrt container" >&2; exit 1; }
