@@ -518,6 +518,10 @@ cmd_reconcile() {
 cmd_admin() {
 	[ -r "$AGH_DIR/admin.pass" ] || { echo "AdGuard Home is not set up" >&2; return 1; }
 	cred=$(cat "$AGH_DIR/admin.pass")
+	if [ "$1" = --password ]; then
+		echo "${cred#*:}"
+		return 0
+	fi
 	printf '{"url":"%s","username":"%s","password":"%s"}\n' "$(agh_url)" "$(json_escape "${cred%%:*}")" "$(json_escape "${cred#*:}")"
 }
 
@@ -662,7 +666,7 @@ case "$1" in
 	sync)      cmd_sync ;;
 	reconcile) cmd_reconcile ;;
 	watch)     cmd_watch ;;
-	admin)     cmd_admin ;;
+	admin)     shift; cmd_admin "$@" ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
@@ -674,7 +678,7 @@ Usage: familydns <command>
   sync                       Apply devices and profiles to AdGuard Home now
   reconcile                  Repair drift (cron hourly and on config change)
   watch                      Fail open: drop the LAN DNS redirect if AdGuard Home stops (cron, every minute)
-  admin                      Print the AdGuard Home admin URL and login as JSON
+  admin [--password]         Print the AdGuard Home admin URL and login as JSON (or just the password)
   profile <id> [--lock]      Print an Apple DNS-over-TLS .mobileconfig for a device
   teardown                   Remove what bootstrap set up (AdGuard Home itself stays)
 EOF
