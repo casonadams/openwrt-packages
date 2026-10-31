@@ -25,6 +25,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build Packages and Pages Artifacts
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
         run: |
           chmod +x scripts/build-apk.sh scripts/generate-pages.sh
           ./scripts/generate-pages.sh

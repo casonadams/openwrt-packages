@@ -5,6 +5,7 @@
 #
 # Version comes from <package>/version.txt (maintained by release-please); VERSION overrides it
 # when exactly one package is built. Output goes to $OUTPUT_DIR (default: dist/).
+# Set APK_SIGNING_KEY to the PEM text of a private key to sign the packages and the index.
 set -e
 
 OUTPUT_DIR="${OUTPUT_DIR:-dist}"
@@ -17,12 +18,21 @@ if ! command -v apk >/dev/null 2>&1 || ! apk --help 2>&1 | grep -q mkpkg; then
 	if command -v docker >/dev/null 2>&1; then
 		echo "apk mkpkg not found locally; building inside an alpine:edge container..."
 		exec docker run --rm -v "$(pwd):/work" -w /work \
-			-e VERSION="${VERSION:-}" -e OUTPUT_DIR="$OUTPUT_DIR" \
+			-e VERSION="${VERSION:-}" -e OUTPUT_DIR="$OUTPUT_DIR" -e APK_SIGNING_KEY \
 			-e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
 			alpine:edge ./scripts/build-apk.sh "$@"
 	fi
 	echo "Error: apk mkpkg or docker is required to build OpenWrt APKv3 packages." >&2
 	exit 1
+fi
+
+SIGN=""
+if [ -n "$APK_SIGNING_KEY" ]; then
+	KEY_FILE=$(mktemp)
+	trap 'rm -f "$KEY_FILE"' EXIT
+	chmod 600 "$KEY_FILE"
+	printf '%s\n' "$APK_SIGNING_KEY" > "$KEY_FILE"
+	SIGN="--sign-key $KEY_FILE"
 fi
 
 # OpenWrt revision format: 1.0.0 -> 1.0.0-r1
@@ -67,7 +77,7 @@ build_one() {
 		--info license:"$(makefile_var "$pkg" PKG_LICENSE)" \
 		--info url:"https://github.com/casonadams/openwrt-packages" \
 		--info depends:"libc luci-base $(makefile_var "$pkg" LUCI_DEPENDS | tr -d '+')" \
-		$scripts \
+		$scripts $SIGN \
 		--output "$OUTPUT_DIR/${pkg}-${version}.apk"
 	cp -f "$OUTPUT_DIR/${pkg}-${version}.apk" "$OUTPUT_DIR/${pkg}.apk"
 	rm -rf "$staging"
@@ -83,7 +93,7 @@ done
 
 echo "Generating repository index packages.adb..."
 # shellcheck disable=SC2086
-apk mkndx --allow-untrusted --output "$OUTPUT_DIR/packages.adb" $BUILT
+apk mkndx --allow-untrusted $SIGN --output "$OUTPUT_DIR/packages.adb" $BUILT
 ls -lh "$OUTPUT_DIR"
 
 # The container runs as root; hand the output back to the invoking user.

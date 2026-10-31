@@ -33,6 +33,7 @@ jobs:
         path: ${{ fromJSON(needs.release-please.outputs.paths_released) }}
     env:
       TAG: ${{ fromJSON(needs.release-please.outputs.all)[format('{0}--tag_name', matrix.path)] }}
+      APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
