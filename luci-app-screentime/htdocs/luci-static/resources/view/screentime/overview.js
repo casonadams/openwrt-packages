@@ -4,7 +4,13 @@
 'require ui';
 'require uci';
 'require rpc';
+'require poll';
 'require form';
+'require screentime.format as fmt';
+
+const ENGINE = '/usr/bin/screentime';
+const POLL_SECONDS = 30;
+const NO_MAC = 'XX:XX:XX:XX:XX:XX';
 
 const callHostHints = rpc.declare({
 	object: 'luci-rpc',
@@ -25,147 +31,67 @@ const callExec = rpc.declare({
 	expect: { '': {} }
 });
 
-function parse24to12(timeStr) {
-	if (!timeStr) return { h: 6, m: 0, ampm: 'PM' };
-	const parts = String(timeStr).split(':');
-	let h = parseInt(parts[0], 10);
-	if (isNaN(h)) h = 18;
-	let m = parseInt(parts[1], 10);
-	if (isNaN(m)) m = 0;
-	const ampm = (h >= 12) ? 'PM' : 'AM';
-	let h12 = h % 12;
-	if (h12 === 0) h12 = 12;
-	return { h: h12, m: m, ampm: ampm };
+function fetchState() {
+	return callExec(ENGINE, ['status', '--json']).then(function(res) {
+		try {
+			return JSON.parse(res.stdout);
+		} catch (e) {
+			return null;
+		}
+	});
 }
 
-function parse12to24(h12, m, ampm) {
-	let h = parseInt(h12, 10);
-	if (isNaN(h)) h = 12;
-	const min = parseInt(m, 10);
-	const mins = isNaN(min) ? 0 : min;
-	if (ampm === 'PM' && h < 12) {
-		h += 12;
-	} else if (ampm === 'AM' && h === 12) {
-		h = 0;
-	}
-	const hStr = (h < 10 ? '0' : '') + h;
-	const mStr = (mins < 10 ? '0' : '') + mins;
-	return hStr + ':' + mStr + ':00';
-}
-
-function formatDurationLabel(mins) {
-	const h = Math.floor(mins / 60);
-	const m = mins % 60;
-	if (h > 0 && m > 0) return h + 'h ' + m + 'm';
-	if (h > 0) return h + 'h';
-	return m + 'm';
-}
-
-function calcCutoffLabel(start24, durationMins) {
-	const parts = String(start24 || '18:00:00').split(':');
-	let h = parseInt(parts[0], 10);
-	if (isNaN(h)) h = 18;
-	let m = parseInt(parts[1], 10);
-	if (isNaN(m)) m = 0;
-	const dur = parseInt(durationMins, 10) || 90;
-
-	const startTot = h * 60 + m;
-	const stopTot = (startTot + dur) % 1440;
-	const stopH = Math.floor(stopTot / 60);
-	const stopM = stopTot % 60;
-	const ampm = (stopH >= 12) ? 'PM' : 'AM';
-	let h12 = stopH % 12;
-	if (h12 === 0) h12 = 12;
-	return h12 + ':' + (stopM < 10 ? '0' : '') + stopM + ' ' + ampm;
-}
-
-function formatDaysLabel(rawDays) {
-	if (!rawDays || rawDays === 'all') return _('Daily');
-	let days = [];
-	if (Array.isArray(rawDays)) {
-		days = rawDays;
-	} else if (typeof rawDays === 'string') {
-		days = rawDays.split(/[,\s]+/).filter(Boolean);
-	}
-	days = days.filter(d => d.toLowerCase() !== 'all');
-	if (days.length === 0 || days.length === 7) return _('Daily');
-
-	const daySet = new Set(days.map(d => d.toLowerCase()));
-	const weekdays = ['mon', 'tue', 'wed', 'thu', 'fri'];
-	const weekends = ['sat', 'sun'];
-
-	if (weekdays.every(d => daySet.has(d)) && daySet.size === 5) return _('Weekdays');
-	if (weekends.every(d => daySet.has(d)) && daySet.size === 2) return _('Weekends');
-
-	const order = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-	const labels = { mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat', sun: 'Sun' };
-	return order.filter(d => daySet.has(d)).map(d => labels[d] || d).join(', ');
+// Custom widgets are plain DOM: read them from the node, or fall back to the stored value
+// when the node is not rendered (e.g. rows that were never opened).
+function widgetValue(option, section_id, read) {
+	const node = option.map.findElement('id', option.cbid(section_id));
+	if (node) return read(node);
+	const cfg = option.cfgvalue(section_id);
+	return (cfg != null && cfg !== '') ? cfg : option.default;
 }
 
 const TimePicker12h = form.Value.extend({
 	default: '18:00:00',
 
 	formvalue: function(section_id) {
-		const node = this.map.findElement('id', this.cbid(section_id));
-		if (!node) {
-			const cfg = this.cfgvalue(section_id);
-			return (cfg != null && cfg !== '') ? cfg : this.default;
-		}
-		const hSel = node.querySelector('.tp-hour');
-		const mSel = node.querySelector('.tp-minute');
-		const aSel = node.querySelector('.tp-ampm');
-		const h = hSel ? hSel.value : '6';
-		const m = mSel ? mSel.value : '0';
-		const a = aSel ? aSel.value : 'PM';
-		return parse12to24(h, m, a);
-	},
-
-	validate: function(_section_id, value) {
-		if (!value || !/^\d{2}:\d{2}:\d{2}$/.test(value)) {
-			return _('Invalid time format');
-		}
-		return true;
+		return widgetValue(this, section_id, function(node) {
+			return fmt.parse12to24(
+				node.querySelector('.tp-hour').value,
+				node.querySelector('.tp-minute').value,
+				node.querySelector('.tp-ampm').value);
+		});
 	},
 
 	renderWidget: function(section_id, _option_index, cfgvalue) {
-		const parsed = parse24to12(cfgvalue || this.default);
+		const parsed = fmt.parse24to12(cfgvalue || this.default);
+		const select = function(cls, width, options, current) {
+			return E('select', {
+				'class': 'cbi-input-select ' + cls,
+				'style': 'width:' + width + 'px;flex:0 0 ' + width + 'px;height:32px;'
+			}, options.map(function(o) {
+				return E('option', { 'value': o.value, 'selected': o.value === current ? '' : null }, o.label);
+			}));
+		};
 
-		const selStyle = 'width:68px !important;max-width:68px !important;min-width:58px !important;flex:0 0 68px !important;height:32px;';
-		const hourSelect = E('select', { 'class': 'cbi-input-select tp-hour', 'style': selStyle });
-		for (let hr = 1; hr <= 12; hr++) {
-			hourSelect.appendChild(E('option', {
-				'value': hr,
-				'selected': (hr === parsed.h) ? '' : null
-			}, (hr < 10 ? '0' : '') + hr));
-		}
+		const hours = [];
+		for (let h = 1; h <= 12; h++) hours.push({ value: String(h), label: (h < 10 ? '0' : '') + h });
+		const minutes = [];
+		for (let m = 0; m < 60; m += 5) minutes.push({ value: String(m), label: (m < 10 ? '0' : '') + m });
+		if (parsed.m % 5 !== 0) minutes.push({ value: String(parsed.m), label: (parsed.m < 10 ? '0' : '') + parsed.m });
+		minutes.sort(function(a, b) { return a.value - b.value; });
 
-		const minuteSelect = E('select', { 'class': 'cbi-input-select tp-minute', 'style': selStyle });
-		const mins = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
-		if (!mins.includes(parsed.m)) mins.push(parsed.m);
-		mins.sort((a, b) => a - b);
-		for (let i = 0; i < mins.length; i++) {
-			minuteSelect.appendChild(E('option', {
-				'value': mins[i],
-				'selected': (mins[i] === parsed.m) ? '' : null
-			}, (mins[i] < 10 ? '0' : '') + mins[i]));
-		}
-
-		const ampmStyle = 'width:76px !important;max-width:76px !important;min-width:68px !important;flex:0 0 76px !important;height:32px;';
-		const ampmSelect = E('select', { 'class': 'cbi-input-select tp-ampm', 'style': ampmStyle }, [
-			E('option', { 'value': 'AM', 'selected': (parsed.ampm === 'AM') ? '' : null }, 'AM'),
-			E('option', { 'value': 'PM', 'selected': (parsed.ampm === 'PM') ? '' : null }, 'PM')
-		]);
-
-		const node = E('div', {
+		return E('div', {
 			'id': this.cbid(section_id),
-			'style': 'display:inline-flex;align-items:center;gap:6px;max-width:240px;width:auto;'
+			'style': 'display:inline-flex;align-items:center;gap:6px;'
 		}, [
-			hourSelect,
-			E('span', { 'style': 'font-weight:700;padding:0 2px;' }, ':'),
-			minuteSelect,
-			ampmSelect
+			select('tp-hour', 68, hours, String(parsed.h)),
+			E('span', { 'style': 'font-weight:700;' }, ':'),
+			select('tp-minute', 68, minutes, String(parsed.m)),
+			select('tp-ampm', 76, [
+				{ value: 'AM', label: 'AM' },
+				{ value: 'PM', label: 'PM' }
+			], parsed.ampm)
 		]);
-		return node;
 	}
 });
 
@@ -173,89 +99,55 @@ const CompactDayPicker = form.Value.extend({
 	default: 'all',
 
 	formvalue: function(section_id) {
-		const node = this.map.findElement('id', this.cbid(section_id));
-		if (!node) {
-			const cfg = this.cfgvalue(section_id);
-			return (cfg != null && cfg !== '') ? cfg : this.default;
-		}
-		const hidden = node.querySelector('input[type="hidden"]');
-		return hidden ? hidden.value : this.default;
+		return widgetValue(this, section_id, function(node) {
+			return node.querySelector('input[type="hidden"]').value;
+		});
 	},
 
-	validate: function(_section_id, _value) {
-		return true;
+	// Custom widgets have no ui element, so validate on parse.
+	parse: function(section_id) {
+		if (this.formvalue(section_id) === '')
+			return Promise.reject(new TypeError(_('Select at least one day of the week.')));
+		return form.Value.prototype.parse.apply(this, arguments);
 	},
 
 	renderWidget: function(section_id, _option_index, cfgvalue) {
-		const daysMap = [
-			{ key: 'mon', label: 'M', title: _('Monday') },
-			{ key: 'tue', label: 'T', title: _('Tuesday') },
-			{ key: 'wed', label: 'W', title: _('Wednesday') },
-			{ key: 'thu', label: 'T', title: _('Thursday') },
-			{ key: 'fri', label: 'F', title: _('Friday') },
-			{ key: 'sat', label: 'S', title: _('Saturday') },
-			{ key: 'sun', label: 'S', title: _('Sunday') }
-		];
-
-		const rawVal = cfgvalue || this.default;
-		let selectedDays = [];
-		if (rawVal === 'all') {
-			selectedDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-		} else if (Array.isArray(rawVal)) {
-			selectedDays = rawVal;
-		} else if (typeof rawVal === 'string') {
-			selectedDays = rawVal.split(/[,\s]+/).filter(Boolean);
-		}
-
-		const hiddenInput = E('input', {
-			'type': 'hidden',
-			'name': this.cbid(section_id),
-			'value': rawVal
-		});
-
+		const labels = { mon: 'M', tue: 'T', wed: 'W', thu: 'T', fri: 'F', sat: 'S', sun: 'S' };
+		const titles = {
+			mon: _('Monday'), tue: _('Tuesday'), wed: _('Wednesday'), thu: _('Thursday'),
+			fri: _('Friday'), sat: _('Saturday'), sun: _('Sunday')
+		};
+		let selected = fmt.normalizeDays(cfgvalue || this.default);
+		const hidden = E('input', { 'type': 'hidden', 'name': this.cbid(section_id) });
 		const container = E('div', {
 			'id': this.cbid(section_id),
 			'style': 'display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;'
-		});
-		container.appendChild(hiddenInput);
+		}, [ hidden ]);
 
-		const buttons = [];
-		const updateHiddenValue = function() {
-			if (selectedDays.length === 7 || selectedDays.length === 0) {
-				hiddenInput.value = 'all';
-			} else {
-				hiddenInput.value = selectedDays.join(' ');
-			}
+		const sync = function() {
+			hidden.value = selected.length === 7 ? 'all' : selected.join(' ');
 		};
+		sync();
 
-		daysMap.forEach(function(d) {
-			let active = selectedDays.includes(d.key);
+		fmt.DAY_KEYS.forEach(function(key) {
 			const btn = E('button', {
 				'type': 'button',
-				'title': d.title,
+				'title': titles[key],
 				'style': 'min-width:32px;height:30px;padding:0 4px;font-size:12px;font-weight:700;'
-			}, d.label);
-
-			const updateDayStyle = function() {
-				btn.className = active ? 'btn cbi-button cbi-button-action important' : 'btn cbi-button';
+			}, labels[key]);
+			const paint = function() {
+				btn.className = selected.indexOf(key) >= 0 ? 'btn cbi-button cbi-button-action important' : 'btn cbi-button';
 			};
-
-			updateDayStyle();
-
+			paint();
 			btn.addEventListener('click', function(ev) {
 				ev.preventDefault();
 				ev.stopPropagation();
-				active = !active;
-				if (active) {
-					if (!selectedDays.includes(d.key)) selectedDays.push(d.key);
-				} else {
-					selectedDays = selectedDays.filter(k => k !== d.key);
-				}
-				updateDayStyle();
-				updateHiddenValue();
+				selected = selected.indexOf(key) >= 0
+					? selected.filter(function(d) { return d !== key; })
+					: fmt.DAY_KEYS.filter(function(d) { return d === key || selected.indexOf(d) >= 0; });
+				paint();
+				sync();
 			});
-
-			buttons.push(btn);
 			container.appendChild(btn);
 		});
 
@@ -263,26 +155,38 @@ const CompactDayPicker = form.Value.extend({
 	}
 });
 
-function wrapOperation(indicatorId, msg, fn) {
-	ui.showModal(null, E('p', { 'class': 'spinning' }, [ msg ]));
-	return fn().then(function(res) {
-		ui.hideModal();
-		window.location.reload();
-		return res;
-	}).catch(function(err) {
-		ui.hideModal();
-		ui.addNotification(null, E('p', [ _('Operation failed: ') + (err.message || err) ]));
-		throw err;
-	});
+const DeviceTargets = form.MultiValue.extend({
+	parse: function(section_id) {
+		const chosen = [].concat(this.formvalue(section_id) || []);
+		if (chosen.indexOf('all') >= 0 && chosen.length > 1)
+			return Promise.reject(new TypeError(_('Choose either "All Managed Devices" or specific devices, not both.')));
+		return form.MultiValue.prototype.parse.apply(this, arguments);
+	}
+});
+
+function badge(text, kind) {
+	const colors = {
+		allowed: 'var(--success-color-high)',
+		blocked: 'var(--error-color-high)',
+		override: 'var(--warning-color-high)',
+		off: 'var(--border-color-medium)'
+	};
+	return E('span', {
+		'class': 'ifacebadge',
+		'style': 'display:inline-flex;align-items:center;padding:4px 10px;font-size:12px;font-weight:600;'
+	}, [
+		E('span', {
+			'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + colors[kind]
+		}),
+		text
+	]);
 }
 
 return view.extend({
-	// Stock handleSave/handleSaveApply do the staging and apply; we only flag blank-row pruning.
+	// Stock handleSave stages the changes; only flag blank-row pruning for this save.
 	handleSave: function(ev) {
-		window.__screentimePruneBlank = true;
-		return view.prototype.handleSave.call(this, ev).finally(function() {
-			window.__screentimePruneBlank = false;
-		});
+		this.pruneBlank = true;
+		return view.prototype.handleSave.call(this, ev).finally(function() { this.pruneBlank = false; }.bind(this));
 	},
 
 	load: function() {
@@ -291,188 +195,133 @@ return view.extend({
 			uci.load('system'),
 			callHostHints(),
 			callSystemInfo(),
-			callExec('/usr/bin/screentime', ['get-state'])
+			fetchState()
 		]);
 	},
 
 	render: function(data) {
+		const self = this;
 		const hostHints = data[2] || {};
-		const sysInfo = data[3] || {};
-		const stateRaw = (data[4] && data[4].stdout) ? data[4].stdout.trim() : 'downtime|none';
+		const localtime = (data[3] || {}).localtime;
+		const tzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
+		let state = data[4];
+		let localOffset = (localtime && state) ? localtime - state.now : 0;
 
-		const stateParts = stateRaw.split('|');
-		const currentStatus = stateParts[0] || 'downtime';
-		const overrideMode = stateParts[1] || 'none';
-
-		const routerTzName = uci.get('system', '@system[0]', 'zonename') || 'UTC';
-		const routerTimestamp = (sysInfo.localtime || Math.floor(Date.now() / 1000)) * 1000;
-		const routerDate = new Date(routerTimestamp);
-		const routerTimeStr = routerDate.toLocaleTimeString('en-US', {
-			timeZone: 'UTC',
-			hour: 'numeric',
-			minute: '2-digit'
+		const header = E('div', {
+			'class': 'cbi-section',
+			'style': 'margin-bottom:16px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;'
 		});
 
-		let m, s, o;
-		// LuCI's standard Save & Apply commits staged UCI changes; rebuild firewall/cron afterwards.
-		if (!window.__screentimeSyncBound) {
-			window.__screentimeSyncBound = true;
-			document.addEventListener('uci-applied', function() {
-				callExec('/usr/bin/screentime', ['sync']);
+		const runAction = function(cmd, btn) {
+			btn.disabled = true;
+			return callExec(ENGINE, [cmd]).then(refresh).catch(function(err) {
+				ui.addNotification(null, E('p', _('Operation failed: %s').format(err.message || err)));
+				btn.disabled = false;
 			});
-		}
+		};
 
-		m = new form.Map('screentime', _('Screen Time'),
-			_('Automated curfew, bedtime scheduling, and parental controls for home network devices.'));
+		const actionButton = function() {
+			if (state.override.mode !== 'none')
+				return [ _('Resume Schedule'), 'clear-override', 'cbi-button-action' ];
+			if (state.in_window)
+				return [ _('Turn On Downtime Now'), 'turn-on-downtime', 'cbi-button-negative' ];
+			return [ _('Ignore Downtime Until Next Window'), 'ignore-downtime', 'cbi-button-negative' ];
+		};
 
-		// 1. Natural Header Control Bar: "Bypass Until Next Window" / "Resume Schedule"
-		s = m.section(form.NamedSection, 'settings', 'settings');
-		s.render = function() {
-			const runAction = function(cmd, el) {
-				el.disabled = true;
-				wrapOperation('override-op', _('Updating...'), function() {
-					return callExec('/usr/bin/screentime', [cmd]);
-				}).catch(function() {
-					el.disabled = false;
-				});
-			};
-
-			// Status badge using LuCI's native ifacebadge and theme color variables
-			const isBypassed = (overrideMode === 'ignore_downtime');
-			const isForcedDowntime = (overrideMode === 'forced_downtime');
-			const inDowntime = (currentStatus === 'downtime' && !isBypassed) || isForcedDowntime;
-
-			let dotColor = 'var(--success-color-high)';
-			let statusText = _('Downtime Active');
-
-			if (isBypassed) {
-				dotColor = 'var(--error-color-high)'; // Red when bypassed!
-				statusText = _('Schedule Bypassed');
-			} else if (inDowntime) {
-				dotColor = 'var(--success-color-high)'; // Green when downtime curfew is active!
-				statusText = _('Downtime Active');
-			} else {
-				dotColor = 'var(--success-color-high)'; // Green when normal schedule is running
-				statusText = _('Schedule Active');
+		const paintHeader = function() {
+			if (!state) {
+				dom.content(header, E('em', _('Could not read the Screen Time status from the router.')));
+				return;
 			}
-
-			const statusBadge = E('span', {
-				'class': 'ifacebadge',
-				'style': 'display:inline-flex;align-items:center;padding:4px 10px;font-size:12px;font-weight:600;'
-			}, [
-				E('span', {
-					'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + dotColor
-				}),
-				statusText
-			]);
-
-			// Clean Router Clock using LuCI's native ifacebadge
-			const clockBadge = E('span', {
-				'class': 'ifacebadge',
-				'style': 'display:inline-flex;align-items:center;padding:4px 10px;font-size:12px;opacity:0.85;'
-			}, routerTimeStr + ' (' + routerTzName + ')');
-
-			// Quick Action Button
-			const actionBtn = E('button', {
-				'type': 'button',
-				'style': 'margin-right:8px;'
+			const desc = fmt.describeState(state, localOffset);
+			const act = actionButton();
+			const btn = E('button', { 'type': 'button', 'class': 'btn cbi-button important ' + act[2] }, act[0]);
+			btn.addEventListener('click', function() { runAction(act[1], btn); });
+			const clock = new Date((state.now + localOffset) * 1000).toLocaleTimeString('en-US', {
+				timeZone: 'UTC', hour: 'numeric', minute: '2-digit'
 			});
-
-			if (overrideMode !== 'none') {
-				actionBtn.textContent = _('Resume Schedule');
-				actionBtn.className = 'btn cbi-button cbi-button-action important';
-				actionBtn.addEventListener('click', function() {
-					runAction('clear-override', actionBtn);
-				});
-			} else if (currentStatus === 'downtime') {
-				actionBtn.textContent = _('Ignore Downtime Until Next Window');
-				actionBtn.className = 'btn cbi-button cbi-button-negative important';
-				actionBtn.addEventListener('click', function() {
-					runAction('ignore-downtime', actionBtn);
-				});
-			} else {
-				actionBtn.textContent = _('Turn On Downtime Now');
-				actionBtn.className = 'btn cbi-button cbi-button-negative important';
-				actionBtn.addEventListener('click', function() {
-					runAction('turn-on-downtime', actionBtn);
-				});
-			}
-
-			return E('div', {
-				'class': 'cbi-section',
-				'style': 'margin-bottom:16px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;'
-			}, [
-				actionBtn,
+			dom.content(header, [
+				btn,
 				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
-					statusBadge,
-					clockBadge
+					badge(desc.text, desc.kind),
+					E('span', { 'class': 'ifacebadge', 'style': 'padding:4px 10px;font-size:12px;opacity:0.85;' },
+						clock + ' (' + tzName + ')')
 				])
 			]);
 		};
 
-		// 2. Allowed Schedules Section (Model A: GridSection with responsive modal editing)
-		s = m.section(form.GridSection, 'schedule', _('Allowed Schedules'));
+		const paintDevice = function(el) {
+			const mac = el.getAttribute('data-screentime-mac');
+			const dev = state && state.devices.find(function(d) { return d.mac === mac; });
+			const desc = fmt.describeDevice(dev, state, localOffset);
+			el.style.color = desc.allowed == null ? '' : (desc.allowed ? 'var(--success-color-high)' : 'var(--error-color-high)');
+			el.textContent = desc.text;
+		};
+
+		const paintDevices = function() {
+			document.querySelectorAll('[data-screentime-mac]').forEach(paintDevice);
+		};
+
+		const refresh = function() {
+			return fetchState().then(function(next) {
+				state = next;
+				paintHeader();
+				paintDevices();
+			});
+		};
+
+		let m, s, o;
+
+		m = new form.Map('screentime', _('Screen Time'),
+			_('Devices listed under Managed Devices have network access only during the scheduled windows below.'));
+
+		// 1. State banner and override button
+		s = m.section(form.NamedSection, 'settings', 'settings');
+		s.render = function() {
+			paintHeader();
+			poll.add(refresh, POLL_SECONDS);
+			return header;
+		};
+
+		// 2. Allowed schedules (GridSection with modal editing)
+		s = m.section(form.GridSection, 'schedule', _('Allowed Schedules'),
+			_('Outside these windows managed devices are blocked. Save & Apply to enforce changes.'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
 		s.modaltitle = _('Screen Time Schedule');
 
-		// Enable Switch (visible in table and modal)
 		o = s.option(form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
 		o.editable = true;
 
-		// Summary column for overview grid (desktop/mobile table)
 		o = s.option(form.DummyValue, '_summary', _('Schedule Window'));
 		o.modalonly = false;
 		o.textvalue = function(section_id) {
-			const name = uci.get('screentime', section_id, 'name');
-			const start = uci.get('screentime', section_id, 'start_time') || '18:00:00';
-			const dur = uci.get('screentime', section_id, 'duration') || '90';
-			const days = uci.get('screentime', section_id, 'weekdays') || 'all';
-
-			const startParts = parse24to12(start);
-			const startStr = startParts.h + ':' + (startParts.m < 10 ? '0' : '') + startParts.m + ' ' + startParts.ampm;
-			const endStr = calcCutoffLabel(start, dur);
-			const daysStr = formatDaysLabel(days);
-
+			const get = function(k, d) { return uci.get('screentime', section_id, k) || d; };
+			const name = get('name', '');
 			const children = [];
-			if (name) {
-				children.push(E('strong', { 'style': 'display:block;margin-bottom:2px;' }, name));
-			}
-			children.push(E('span', { 'style': 'font-weight:600;' }, startStr + ' – ' + endStr));
-			children.push(document.createTextNode(' '));
-			children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' }, '(' + daysStr + ')'));
-
+			if (name) children.push(E('strong', { 'style': 'display:block;margin-bottom:2px;' }, name));
+			children.push(E('span', { 'style': 'font-weight:600;' },
+				fmt.formatWindow(get('start_time', '18:00:00'), get('duration', '90'))));
+			children.push(' ');
+			children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' },
+				'(' + fmt.formatDays(get('weekdays', 'all')) + ')'));
 			return E('div', { 'style': 'line-height:1.4;' }, children);
 		};
 
-		// Dedicated Duration summary column on main grid
-		o = s.option(form.DummyValue, '_duration_summary', _('Duration'));
-		o.modalonly = false;
-		o.textvalue = function(section_id) {
-			const dur = uci.get('screentime', section_id, 'duration') || '90';
-			return E('span', { 'style': 'font-weight:600;' }, formatDurationLabel(dur));
-		};
-
-		// Applies To summary for overview grid
 		o = s.option(form.DummyValue, '_devices_summary', _('Applies To'));
 		o.modalonly = false;
 		o.textvalue = function(section_id) {
-			const targetDevs = uci.get('screentime', section_id, 'devices');
-			if (!targetDevs || targetDevs === 'all' || (Array.isArray(targetDevs) && targetDevs.includes('all'))) {
-				return E('span', {
-					'class': 'ifacebadge',
-					'style': 'display:inline-block;padding:2px 8px;font-size:11px;font-weight:600;'
-				}, _('All Devices'));
-			}
-			const count = Array.isArray(targetDevs) ? targetDevs.length : 1;
+			const targets = [].concat(uci.get('screentime', section_id, 'devices') || 'all');
+			const all = targets.indexOf('all') >= 0;
+			const count = targets.length;
 			return E('span', {
-				'class': 'ifacebadge ifacebadge-active',
+				'class': 'ifacebadge' + (all ? '' : ' ifacebadge-active'),
 				'style': 'display:inline-block;padding:2px 8px;font-size:11px;font-weight:600;'
-			}, (count === 1 ? _('1 Device') : _('%d Devices').format(count)));
+			}, all ? _('All Devices') : (count === 1 ? _('1 Device') : _('%d Devices').format(count)));
 		};
-		// --- Modal-only detailed options ---
+
 		o = s.option(form.Value, 'name', _('Schedule Name'));
 		o.modalonly = true;
 		o.placeholder = _('e.g. Evening Homework, Bedtime (Optional)');
@@ -480,65 +329,43 @@ return view.extend({
 
 		o = s.option(CompactDayPicker, 'weekdays', _('Days of Week'));
 		o.modalonly = true;
-		o.default = 'all';
 
 		o = s.option(TimePicker12h, 'start_time', _('Start Time'));
 		o.modalonly = true;
-		o.default = '18:00:00';
 
-		const durations = [
-			15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300, 360
-		];
 		o = s.option(form.ListValue, 'duration', _('Duration'));
 		o.modalonly = true;
-		for (let i = 0; i < durations.length; i++) {
-			o.value(String(durations[i]), formatDurationLabel(durations[i]));
-		}
+		[15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300, 360, 480, 600, 720].forEach(function(mins) {
+			o.value(String(mins), fmt.formatDuration(mins));
+		});
 		o.default = '90';
 
-		o = s.option(form.DummyValue, '_cutoff', _('End Time'));
-		o.modalonly = true;
-		o.rawhtml = true;
-		o.cfgvalue = function(section_id) {
-			const start = uci.get('screentime', section_id, 'start_time') || '18:00:00';
-			const dur = uci.get('screentime', section_id, 'duration') || '90';
-			const cutoffStr = calcCutoffLabel(start, dur);
-			return '<strong>' + cutoffStr + '</strong>';
-		};
-
-		o = s.option(form.MultiValue, 'devices', _('Applies To (Target Devices)'));
+		o = s.option(DeviceTargets, 'devices', _('Applies To (Target Devices)'));
 		o.modalonly = true;
 		o.default = 'all';
 		o.rmempty = true;
+		o.description = _('Devices added below show up here after you click Save.');
 		o.value('all', _('All Managed Devices (Default)'));
+		(uci.sections('screentime', 'device') || []).forEach(function(dev) {
+			const mac = (dev.mac || '').toLowerCase();
+			if (mac) o.value(mac, dev.name ? '%s (%s)'.format(dev.name, mac) : mac);
+		});
 
-		const deviceSections = uci.sections('screentime', 'device') || [];
-		for (let i = 0; i < deviceSections.length; i++) {
-			const devSec = deviceSections[i];
-			const mac = (devSec.mac || '').toLowerCase();
-			if (mac) {
-				const devLabel = devSec.name ? '%s (%s)'.format(devSec.name, mac) : mac;
-				o.value(mac, devLabel);
-			}
-		}
-
-		// 3. Managed Devices Section (Clean 3-column table: Enable, Name, MAC)
-		s = m.section(form.TableSection, 'device', _('Managed Devices'));
+		// 3. Managed devices
+		s = m.section(form.TableSection, 'device', _('Managed Devices'),
+			_('Only these devices are restricted; everything else on the network is untouched.'));
 		s.anonymous = true;
 		s.addremove = true;
 		s.sortable = true;
 
-		// Rows added with "Add" but left without a MAC are dropped instead of saved or rejected.
+		// Rows added with "Add" but left without a MAC are dropped on a user-initiated Save.
 		s.parse = function() {
 			const macOpt = this.children.find(function(c) { return c.option === 'mac'; });
 			const tasks = [];
 			this.cfgsections().forEach(function(sid) {
 				const mac = macOpt.formvalue(sid);
-				if (!mac || mac === 'XX:XX:XX:XX:XX:XX') {
-					// "Add" itself triggers map.save(); only drop blank rows on a user-initiated Save.
-					if (window.__screentimePruneBlank) {
-						this.map.data.remove('screentime', sid);
-					}
+				if (!mac || mac === NO_MAC) {
+					if (self.pruneBlank) this.map.data.remove('screentime', sid);
 					return;
 				}
 				this.children.forEach(function(c) { tasks.push(c.parse(sid)); });
@@ -565,15 +392,12 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'mac', _('MAC Address'));
-		o.placeholder = 'XX:XX:XX:XX:XX:XX';
+		o.placeholder = NO_MAC;
 		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			if (!value || value === 'XX:XX:XX:XX:XX:XX') {
-				return true;
-			}
-			if (!/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value)) {
+			if (!value || value === NO_MAC) return true;
+			if (!/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(value))
 				return _('Expecting valid MAC address (e.g. 00:11:22:33:44:55)');
-			}
 			return true;
 		};
 		o.write = function(section_id, formvalue) {
@@ -583,33 +407,32 @@ return view.extend({
 			if (!value) return;
 			const nameInput = document.querySelector('[name="cbid.screentime.' + section_id + '.name"]');
 			if (nameInput && !nameInput.value) {
-				const val = value.toLowerCase();
-				const hint = hostHints[val] || hostHints[val.toUpperCase()] || {};
+				const hint = hostHints[value.toLowerCase()] || hostHints[value.toUpperCase()] || {};
 				if (hint.name) {
 					nameInput.value = hint.name;
 					nameInput.dispatchEvent(new Event('change', { bubbles: true }));
 				}
 			}
 		};
+		Object.keys(hostHints).sort().forEach(function(key) {
+			const info = hostHints[key] || {};
+			const ip = (info.ipaddrs && info.ipaddrs.length > 0) ? info.ipaddrs[0] : '';
+			const mac = key.toLowerCase();
+			let label = mac;
+			if (info.name && ip) label = '%s — %s (%s)'.format(info.name, ip, mac);
+			else if (info.name) label = '%s (%s)'.format(info.name, mac);
+			else if (ip) label = '%s (%s)'.format(ip, mac);
+			o.value(mac, label);
+		});
 
-		// Populate dropdown with active/known network hosts from luci-rpc getHostHints
-		const sortedMacs = Object.keys(hostHints).sort();
-		for (let i = 0; i < sortedMacs.length; i++) {
-			const mAddr = sortedMacs[i].toLowerCase();
-			const info = hostHints[sortedMacs[i]] || {};
-			const name = info.name || '';
-			const ips = (info.ipaddrs && info.ipaddrs.length > 0) ? info.ipaddrs[0] : '';
-
-			let label = mAddr;
-			if (name && ips) {
-				label = '%s — %s (%s)'.format(name, ips, mAddr);
-			} else if (name) {
-				label = '%s (%s)'.format(name, mAddr);
-			} else if (ips) {
-				label = '%s (%s)'.format(ips, mAddr);
-			}
-			o.value(mAddr, label);
-		}
+		// TableSection renders cells through renderWidget (textvalue is only used by GridSection).
+		o = s.option(form.DummyValue, '_status', _('Status'));
+		o.renderWidget = function(section_id) {
+			const mac = (uci.get('screentime', section_id, 'mac') || '').toLowerCase();
+			const el = E('span', { 'data-screentime-mac': mac, 'style': 'font-weight:600;' });
+			paintDevice(el);
+			return el;
+		};
 
 		return m.render();
 	}
