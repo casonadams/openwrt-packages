@@ -10,12 +10,13 @@ Custom OpenWrt packages, published as an apk feed for OpenWrt 25+.
 
 ## Install
 
-Add the feed once, then install any package from the table:
+Packages and the index are signed. Trust the key and add the feed once, then install any package from the table:
 
 ```bash
+wget -O /etc/apk/keys/casonadams.pub https://casonadams.github.io/openwrt-packages/casonadams.pub
 echo "https://casonadams.github.io/openwrt-packages/packages.adb" > /etc/apk/repositories.d/casonadams.list
-apk update --allow-untrusted
-apk add --allow-untrusted <package>
+apk update
+apk add <package>
 ```
 
 Or in one step: `wget -qO- https://raw.githubusercontent.com/casonadams/openwrt-packages/main/install.sh | sh -s -- <package>` (defaults to `luci-app-screentime`).

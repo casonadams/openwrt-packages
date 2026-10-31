@@ -10,9 +10,10 @@ Schedule-based parental controls for OpenWrt 25+ (nftables). Managed devices hav
 ## Install
 
 ```bash
+wget -O /etc/apk/keys/casonadams.pub https://casonadams.github.io/openwrt-packages/casonadams.pub
 echo "https://casonadams.github.io/openwrt-packages/packages.adb" > /etc/apk/repositories.d/casonadams.list
-apk update --allow-untrusted
-apk add --allow-untrusted luci-app-screentime
+apk update
+apk add luci-app-screentime
 ```
 
 Or: `wget -qO- https://raw.githubusercontent.com/casonadams/openwrt-packages/main/install.sh | sh`

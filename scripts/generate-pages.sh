@@ -5,9 +5,11 @@ set -e
 
 OUTPUT_DIR="${OUTPUT_DIR:-dist}"
 REPO_URL="https://github.com/casonadams/openwrt-packages"
-FEED_URL="https://casonadams.github.io/openwrt-packages/packages.adb"
+SITE_URL="https://casonadams.github.io/openwrt-packages"
+FEED_URL="${SITE_URL}/packages.adb"
 
 ./scripts/build-apk.sh
+cp keys/*.pub "${OUTPUT_DIR}/"
 
 packages=""
 for mk in */Makefile; do
@@ -46,9 +48,10 @@ cat > "${OUTPUT_DIR}/index.html" << EOF
 
     <div class="card">
       <h2>Add the feed (OpenWrt 25+)</h2>
-      <pre><code>echo "${FEED_URL}" > /etc/apk/repositories.d/casonadams.list
-apk update --allow-untrusted
-apk add --allow-untrusted &lt;package&gt;</code></pre>
+      <pre><code>wget -O /etc/apk/keys/casonadams.pub ${SITE_URL}/casonadams.pub
+echo "${FEED_URL}" > /etc/apk/repositories.d/casonadams.list
+apk update
+apk add &lt;package&gt;</code></pre>
     </div>
 
     <div class="card">

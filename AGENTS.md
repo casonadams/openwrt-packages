@@ -38,8 +38,9 @@ Optional `postinst` / `prerm` files in the package directory become apk post-ins
 
 - **Build**: `./scripts/build-apk.sh [package ...]` runs `apk mkpkg` (in an `alpine:edge` container when apk is not installed) and writes `dist/<pkg>-<version>.apk`, `dist/<pkg>.apk` and one shared `dist/packages.adb`. The version comes from `<pkg>/version.txt`; `depends` and license come from the package `Makefile`.
 - **Release**: release-please runs on every push to `main`, one release PR per package, based on commits touching that package's directory (Conventional Commits). Merging a PR tags `<package>-v<version>`, updates `<package>/{CHANGELOG.md,version.txt,Makefile}`, and `release.yml` builds that package and uploads its apk and `SHA256SUMS` to the release.
+- **Signing**: `scripts/build-apk.sh` signs packages and `packages.adb` with the PEM in `$APK_SIGNING_KEY` (GitHub secret of the same name, used by `pages.yml` and `release.yml`; unsigned when unset). The public key is `keys/casonadams.pub`, published on Pages and fetched by `install.sh`. The private key must never be committed. To rotate: generate a new EC key (`openssl ecparam -name prime256v1 -genkey -noout`), update the secret and `keys/*.pub`; users re-fetch the key.
 - **Feed**: `pages.yml` builds every package from `main` into one `packages.adb` and publishes it at `https://casonadams.github.io/openwrt-packages/packages.adb`.
-- **Install**: add the feed and `apk add --allow-untrusted <package>`, or run `install.sh [package]` (it does the same).
+- **Install**: trust `keys/casonadams.pub`, add the feed and `apk add <package>`, or run `install.sh [package]` (it does the same).
 
 ---
 
