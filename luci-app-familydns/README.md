@@ -10,7 +10,7 @@ Install: see the [repository README](../README.md#install). Your household DNS i
 
 1. Create a DuckDNS name and note its token.
 2. **Services → Family DNS**: enter the domain (`<name>.duckdns.org`), token and email, tick *Enabled*, **Save & Apply**, then **Set up / Repair**. Certificate issuance takes about two minutes.
-3. Pick **Profiles** (each sets filters and, optionally, its own DNS servers; the defaults use CleanBrowsing's family filter for kids and its security filter for adults), then add **Devices** (a name, an id such as `kid1`, and a profile), **Save & Apply**, then **Install profile** and AirDrop the file to the device.
+3. Pick **Profiles** (each sets filters and, optionally, its own DNS servers; the defaults use CleanBrowsing's family filter for kids and its adult filter for adults), then add **Devices** (a name, an id such as `kid1`, and a profile), **Save & Apply**, then **Install profile** and AirDrop the file to the device.
 
 The AdGuard Home admin UI is at `http://<router>:3001` (LAN only); its generated password is in `/etc/adguardhome/admin.pass`.
 
