@@ -1,113 +1,66 @@
 # OpenWrt Packages
 
-A collection of custom OpenWrt applications and utilities maintained by [Cason Adams](https://github.com/casonadams).
-
----
+Custom OpenWrt packages.
 
 ## `luci-app-screentime`
 
-An automated screen time scheduler, bedtime curfew, and parental controls manager for OpenWrt 24+ and 25+ (nftables).
+Schedule-based parental controls for OpenWrt 24+/25+ (nftables). Managed devices have network access **only during scheduled windows**; outside every window they are blocked, unless you choose **Ignore Downtime Until Next Window**.
 
-Managed devices have network access **only during scheduled windows**. Outside every window they are blocked, unless you choose "Ignore Downtime Until Next Window".
+- **LuCI UI** under **Services → Screen Time**: a banner with the current state and when it ends, a per-device status column, and a one-click override. Schedules are edited in a mobile-friendly modal (days, start time, duration, target devices).
+- **CLI** (`screentime`) for the same controls over SSH.
+- **Hard cutoff**: blocked MACs live in a private `inet screentime` nft table (`firewall4` config is untouched), and active connections of a newly blocked device are dropped with `conntrack` (IPv4 and IPv6).
+- **No daemon**: cron reconciles every minute and when NTP syncs. Configuration is plain UCI (`/etc/config/screentime`) and survives sysupgrades.
 
-Provides a modern, mobile-responsive LuCI Web UI under **Services → Screen Time** as well as a fast terminal CLI (`screentime`).
+### Install
 
-### Features
+With the package feed (OpenWrt 25+):
 
-- **Apple Screen Time Style State**: Clean header card with live router clock, status banner that says when the current state ends ("Allowed until 8:30 PM", "Downtime – next window opens Sat 6:00 PM", "Downtime ignored until …"), a per-device status column, and a one-click override button (`Ignore Downtime Until Next Window` / `Turn On Downtime Now`).
-- **Responsive Mobile-First UI (Model A)**: Uses LuCI's native `GridSection` with a compact summary table on desktop and mobile, with full-screen touch-friendly modal editing for schedules.
-- **Per-Schedule Device Targeting**: Schedules can apply to `All Managed Devices` or specific devices.
-- **Optional Device Names & Auto-Discovery**: Select target devices from a live dropdown populated by router DHCP leases and ARP host hints; friendly names auto-populate if left blank.
-- **True Kernel Cutoff**: Blocked MACs live in a private `inet screentime` nftables table (no `firewall4` config is touched). A cron reconcile runs every minute and when NTP syncs. When a device becomes blocked, its active TCP/UDP video/game streams (Netflix, YouTube, Disney+, Xbox, PlayStation) are severed immediately using `conntrack` (IPv4 and IPv6).
-- **Native OpenWrt Integration**: Full UCI configuration (`/etc/config/screentime`) preserved across sysupgrades. Zero daemon overhead.
-
----
-
-### Installation
-
-#### Method 1: Add Package Repository Feed (OpenWrt 25+)
-
-Add our custom feed directly to your router so you can install and update via standard `apk`:
 ```bash
 echo "https://casonadams.github.io/openwrt-packages/packages.adb" > /etc/apk/repositories.d/casonadams.list
 apk update --allow-untrusted
 apk add --allow-untrusted luci-app-screentime
 ```
 
-#### Method 2: One-Line Installer Script
+Or the one-line installer:
 
-Quick install without adding permanent repository feeds:
 ```bash
 wget -qO- https://raw.githubusercontent.com/casonadams/openwrt-packages/main/install.sh | sh
 ```
-*(or `curl -sSL https://raw.githubusercontent.com/casonadams/openwrt-packages/main/install.sh | sh`)*
 
-#### Method 3: Direct Download & Install from GitHub Release (APK)
+The service is enabled and started on install; removing the package cleans up its rules and cron entry.
 
-```bash
-wget -O /tmp/luci-app-screentime.apk https://github.com/casonadams/openwrt-packages/releases/latest/download/luci-app-screentime.apk
-apk add --allow-untrusted /tmp/luci-app-screentime.apk
-rm /tmp/luci-app-screentime.apk
-/etc/init.d/rpcd restart
-```
+### Use
 
-#### Method 4: Manual Direct Copy (Development)
+**Web:** open **Services → Screen Time**, add devices under **Managed Devices**, edit schedules under **Allowed Schedules**, then **Save & Apply**.
+
+**CLI:**
 
 ```bash
-# Clone and copy to router
-git clone https://github.com/casonadams/openwrt-packages.git
-cd openwrt-packages/luci-app-screentime
-
-scp -r root/etc/* root@192.168.1.1:/etc/
-scp -r root/usr/* root@192.168.1.1:/usr/
-scp -r htdocs/* root@192.168.1.1/www/
-
-# Restart services
-ssh root@192.168.1.1 "/etc/init.d/rpcd restart && /etc/init.d/screentime restart"
+screentime status [--json]        # state and per-device status
+screentime ignore-downtime        # devices allowed until the next window opens
+screentime turn-on-downtime       # devices blocked until the current window closes
+screentime clear-override         # back to the schedule
+screentime add-device "Living Room TV" 00:11:22:33:44:55
+screentime remove-device 00:11:22:33:44:55
+screentime reconcile              # apply now (cron does this every minute)
 ```
 
----
+### Notes
 
-### Web Interface Usage
+- A device with no schedule, or no enabled schedule, stays blocked.
+- Devices that use a randomised ("private") MAC address can evade a MAC-based block; turn that off for managed devices.
 
-1. Open your router web interface (e.g., `http://192.168.1.1`).
-2. Navigate to **Services → Screen Time**.
-3. **Allowed Schedules**: Review active schedules (devices outside every window are blocked). Tap **Edit** on any schedule to configure days of the week, start time (12h format), duration, and target devices.
-4. **Managed Devices**: Add devices from the dropdown of active network hosts. Friendly names are optional and automatically detect the device's hostname.
-5. Click **Save & Apply**.
-
----
-
-### Command-Line Interface (`screentime`)
-
-You can control Screen Time from any SSH session or terminal:
+### Development
 
 ```bash
-# View current status, clock, and per-device state (add --json for the machine-readable form)
-screentime status
-
-# Apply the schedule right now (cron does this every minute)
-screentime reconcile
-
-# Ignore downtime (devices allowed until the next window opens)
-screentime ignore-downtime
-
-# Turn on downtime (devices blocked until the current window closes)
-screentime turn-on-downtime
-
-# Clear override and revert to normal schedule
-screentime clear-override
-
-# Add a target device (friendly name is optional)
-screentime add-device "Samsung TV" 00:11:22:33:44:55
-screentime add-device 00:00:5e:00:53:03
-
-# Remove a target device
-screentime remove-device 00:00:5e:00:53:03
+sh tests/test_engine.sh   # engine logic with a fake clock
+node tests/test_ui.js     # UI formatting helpers
+docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w openwrt/rootfs:x86-64-24.10.2 \
+  sh tests/test_integration.sh   # real uci and nft
 ```
 
----
+See `AGENTS.md` for architecture and live-router deployment.
 
-### License
+## License
 
-Apache License 2.0. Open source for the OpenWrt community.
+Apache License 2.0.
