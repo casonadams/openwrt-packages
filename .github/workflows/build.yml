@@ -25,14 +25,20 @@ jobs:
             luci-app-screentime/root/usr/bin/screentime \
             luci-app-screentime/root/etc/init.d/screentime \
             luci-app-screentime/root/etc/uci-defaults/99_screentime \
+            luci-app-screentime/root/etc/hotplug.d/ntp/99-screentime \
+            luci-app-screentime/prerm \
+            luci-app-screentime/postinst \
             install.sh \
             scripts/build-apk.sh \
             scripts/generate-pages.sh \
-            tests/test_engine.sh
+            tests/lib.sh \
+            tests/test_engine.sh \
+            tests/test_integration.sh
 
       - name: JavaScript & JSON Syntax Check
         run: |
           node --check luci-app-screentime/htdocs/luci-static/resources/view/screentime/overview.js
+          node --check luci-app-screentime/htdocs/luci-static/resources/screentime/format.js
           node -e '
           const fs = require("fs");
           const files = [
@@ -51,6 +57,14 @@ jobs:
         run: |
           chmod +x tests/test_engine.sh
           ./tests/test_engine.sh
+
+      - name: Run UI Test Suite
+        run: node tests/test_ui.js
+
+      - name: Run Integration Tests (real uci and nft)
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$PWD:/w" -w /w \
+            openwrt/rootfs:x86-64-24.10.2 sh tests/test_integration.sh
 
   build:
     name: Build APK Packages

@@ -21,7 +21,6 @@ openwrt-packages/
 │   ├── pages.yml               # CD: Deploys APKv3 package repository to GitHub Pages
 │   └── release.yml             # Release Please: automated tagging and GitHub Releases
 ├── AGENTS.md                   # This file (engineering rules & deployment guide)
-├── HANDOFF.md                  # Subsystem state, context, and architecture overview
 ├── README.md                   # Public documentation, CLI guide, screenshots
 ├── install.sh                  # One-line instant installer for OpenWrt
 ├── release-please-config.json  # Release-Please configuration
@@ -30,24 +29,27 @@ openwrt-packages/
 │   ├── build-apk.sh            # APKv3 ADB package assembler via apk mkpkg
 │   └── generate-pages.sh       # Assembles GitHub Pages repo feed and landing page
 ├── tests/
-│   └── test_engine.sh          # 23-assertion unit test suite
+│   ├── test_engine.sh          # Engine test suite (decision logic, overrides, reconcile)
+│   └── test_ui.js              # Node tests for the pure UI formatting module
 └── luci-app-screentime/
     ├── Makefile                # Standard OpenWrt LuCI package specification
     ├── htdocs/luci-static/resources/view/
     │   └── screentime/
     │       └── overview.js     # Client-side LuCI JavaScript Web UI (Model A: GridSection + modal)
+    │   └── screentime/format.js  # Pure formatting/banner helpers (unit-tested by tests/test_ui.js)
     └── root/
         ├── etc/
         │   ├── config/
         │   │   └── screentime         # UCI configuration (schedules & devices)
         │   ├── init.d/
-        │   │   └── screentime         # Procd init service (syncs firewall & cron)
+        │   │   └── screentime         # Procd init service (installs the per-minute cron, reconciles)
         │   └── uci-defaults/
         │       └── 99_screentime      # Post-install auto-enablement script
         └── usr/
             ├── bin/
             │   └── screentime         # Core shell engine: nftables rules, conntrack flush
             └── share/
+                ├── screentime/decide.awk         # Single source of truth: "is this device allowed now?"
                 ├── luci/menu.d/
                 │   └── luci-app-screentime.json  # Menu entry: Services -> Screen Time
                 └── rpcd/acl.d/
@@ -62,22 +64,26 @@ openwrt-packages/
    - **Main Overview**: Renders a compact 4-column summary table (`Enable`, `Schedule Window`, `Applies To`, `Actions: Edit/Delete`) that fits effortlessly on small mobile screens (360px–480px) with zero horizontal overflow.
    - **Modal Editing**: Tapping `[ Edit ]` opens LuCI's native modal dialog, providing generous full-width touch controls for Days of Week (`[M] [T] [W] [T] [F] [S] [S]`), 12-hour time dropdowns (`HH:MM AM/PM`), duration, and target device selection.
 2. **Bottom Action Buttons (stock LuCI flow, no overrides)**:
-   - Do NOT override `handleSave`/`handleSaveApply`/`handleReset`. LuCI stages changes through session-scoped ubus `uci` calls; a CLI `uci commit` (e.g. via `file exec`) cannot see them, so the "Unsaved Changes" banner never clears and nothing reaches disk.
-   - **`[ Save & Apply ]`** runs stock `ui.changes.apply()` (commit + `reload_config`). The view listens for LuCI's `uci-applied` event and runs `/usr/bin/screentime sync` to rebuild firewall rules and cron.
+   - Do NOT replace `handleSave`/`handleSaveApply`/`handleReset` (the view's `handleSave` only flags blank-row pruning and calls the stock one). LuCI stages changes through session-scoped ubus `uci` calls; a CLI `uci commit` (e.g. via `file exec`) cannot see them, so the "Unsaved Changes" banner never clears and nothing reaches disk.
+   - **`[ Save & Apply ]`** runs stock `ui.changes.apply()` (commit + `reload_config`). The procd reload trigger on the `screentime` config then runs `/usr/bin/screentime reconcile`.
    - **`[ Save ]`** stages only; **`[ Reset ]`** reverts staged changes.
    - Managed Devices rows with an empty MAC are pruned on save (`mac` option `write` removes the section).
-3. **Apple Screen Time Style State Header**:
-   - Header control bar displays live router clock, status badge, and one-click override button (`Ignore Downtime Until Next Window` / `Resume Schedule` / `Turn On Downtime Now`).
-   - Badge: green `Downtime Active` while the curfew is enforcing, green `Schedule Active` inside an allowed window, red `Schedule Bypassed` while the override is on.
+3. **State Header and Device Status**:
+   - Everything shown comes from `screentime status --json` (fetched on load, after each action, and every 30 s). The UI never recomputes schedule logic.
+   - Banner: green `Allowed until <time>`, red `Downtime - next window opens <time>`, amber `Downtime ignored/forced until <time>`. Button: `Ignore Downtime Until Next Window` (in downtime) / `Turn On Downtime Now` (inside a window) / `Resume Schedule` (override active).
+   - Managed Devices table has a read-only per-device `Status` column fed from the same JSON.
 
 ---
 
 ## 4. Backend Engine Rules (`/usr/bin/screentime`)
 
 - **POSIX Shell Only**: Shell scripts must run on BusyBox ash (`/bin/sh`). No bashisms, no arrays, no `[[ ]]`.
-- **Zero-Allocation Memory Footprint**: Router has 256MB total RAM. Pure shell parameter expansions used for time/string parsing; zero unnecessary subshells.
-- **Firewall Integration**: Interacts cleanly with `firewall4` / nftables table `inet fw4`.
-- **Conntrack Flushing**: Cutoff enforcement flushes active conntrack sessions (`conntrack -D -s <IP>`) so established video/game streams drop immediately.
+- **One decision function**: `decide.awk` reads `uci show screentime` and answers per-device allowed/blocked, next change and JSON. Enforcement and UI both use it; do not duplicate window logic in shell or JS. A window belongs to its start day and may cross midnight. `duration` is the only end-time source.
+- **Enforcement**: a private nft table `inet screentime` (set `blocked`, forward hook at priority -1, `reject`), replaced atomically with `nft -f`. `firewall4` and `/etc/config/firewall` are never touched. No schedules or an unlisted device means blocked 24/7.
+- **Reconcile**: cron runs `screentime reconcile` every minute and the ntp hotplug runs it when the clock syncs. It is idempotent and skips while the clock is before 2023 (NTP not synced).
+- **Overrides**: `/etc/screentime.override` holds `<ignore|forced> <expiry epoch>`; the expiry is the next global window open/close, so a missed cron or reboot cannot leave it stuck.
+- **Conntrack Flushing**: only devices that just became blocked are flushed, IPv4 and IPv6 (addresses from dhcp.leases and `ip neigh`).
+- **Testing hooks**: `SCREENTIME_CLOCK="<dow> <secs> <epoch>"` fakes the clock; `OVERRIDE_FILE`, `STATE_FILE`, `LOCK_DIR`, `LEASES_FILE` and `SCREENTIME_DECIDE` redirect state for tests.
 
 ---
 
@@ -89,8 +95,10 @@ Direct live-testing commands against `root@192.168.1.1`:
 # Push view changes to live router (use -O for Dropbear legacy scp)
 scp -O luci-app-screentime/htdocs/luci-static/resources/view/screentime/overview.js root@192.168.1.1:/www/luci-static/resources/view/screentime/overview.js
 
-# Push engine script to live router
+# Push engine and decision function to live router
 scp -O luci-app-screentime/root/usr/bin/screentime root@192.168.1.1:/usr/bin/screentime
+scp -O luci-app-screentime/root/usr/share/screentime/decide.awk root@192.168.1.1:/usr/share/screentime/decide.awk
+scp -O luci-app-screentime/htdocs/luci-static/resources/screentime/format.js root@192.168.1.1:/www/luci-static/resources/screentime/format.js
 
 # Push procd init script to live router
 scp -O luci-app-screentime/root/etc/init.d/screentime root@192.168.1.1:/etc/init.d/screentime

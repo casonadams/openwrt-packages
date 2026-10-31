@@ -6,17 +6,19 @@ A collection of custom OpenWrt applications and utilities maintained by [Cason A
 
 ## `luci-app-screentime`
 
-An automated screen time scheduler, bedtime curfew, and parental controls manager for OpenWrt 24+ and 25+ (with `firewall4` nftables).
+An automated screen time scheduler, bedtime curfew, and parental controls manager for OpenWrt 24+ and 25+ (nftables).
+
+Managed devices have network access **only during scheduled windows**. Outside every window they are blocked, unless you choose "Ignore Downtime Until Next Window".
 
 Provides a modern, mobile-responsive LuCI Web UI under **Services → Screen Time** as well as a fast terminal CLI (`screentime`).
 
 ### Features
 
-- **Apple Screen Time Style State**: Clean header card with live router clock, live status badge (`Downtime Active` vs `Internet Allowed`), and one-click override button (`Ignore Downtime Until Next Window` / `Turn On Downtime Now`).
-- **Responsive Mobile-First UI (Model A)**: Uses LuCI's native `GridSection` with a compact 4-column summary table on desktop and mobile, with full-screen touch-friendly modal editing for schedules.
+- **Apple Screen Time Style State**: Clean header card with live router clock, status banner that says when the current state ends ("Allowed until 8:30 PM", "Downtime – next window opens Sat 6:00 PM", "Downtime ignored until …"), a per-device status column, and a one-click override button (`Ignore Downtime Until Next Window` / `Turn On Downtime Now`).
+- **Responsive Mobile-First UI (Model A)**: Uses LuCI's native `GridSection` with a compact summary table on desktop and mobile, with full-screen touch-friendly modal editing for schedules.
 - **Per-Schedule Device Targeting**: Schedules can apply to `All Managed Devices` or specific devices.
 - **Optional Device Names & Auto-Discovery**: Select target devices from a live dropdown populated by router DHCP leases and ARP host hints; friendly names auto-populate if left blank.
-- **True Kernel Cutoff**: Operates inside Linux kernel `nftables` via `firewall4`. When downtime arrives, active TCP/UDP video/game streams (Netflix, YouTube, Disney+, Xbox, PlayStation) are severed immediately using `conntrack`.
+- **True Kernel Cutoff**: Blocked MACs live in a private `inet screentime` nftables table (no `firewall4` config is touched). A cron reconcile runs every minute and when NTP syncs. When a device becomes blocked, its active TCP/UDP video/game streams (Netflix, YouTube, Disney+, Xbox, PlayStation) are severed immediately using `conntrack` (IPv4 and IPv6).
 - **Native OpenWrt Integration**: Full UCI configuration (`/etc/config/screentime`) preserved across sysupgrades. Zero daemon overhead.
 
 ---
@@ -70,7 +72,7 @@ ssh root@192.168.1.1 "/etc/init.d/rpcd restart && /etc/init.d/screentime restart
 
 1. Open your router web interface (e.g., `http://192.168.1.1`).
 2. Navigate to **Services → Screen Time**.
-3. **Allowed Schedules**: Review active schedules. Tap **Edit** on any schedule to configure days of the week, start time (12h format), duration, and target devices.
+3. **Allowed Schedules**: Review active schedules (devices outside every window are blocked). Tap **Edit** on any schedule to configure days of the week, start time (12h format), duration, and target devices.
 4. **Managed Devices**: Add devices from the dropdown of active network hosts. Friendly names are optional and automatically detect the device's hostname.
 5. Click **Save & Apply**.
 
@@ -81,13 +83,16 @@ ssh root@192.168.1.1 "/etc/init.d/rpcd restart && /etc/init.d/screentime restart
 You can control Screen Time from any SSH session or terminal:
 
 ```bash
-# View current status, clock, and active devices
+# View current status, clock, and per-device state (add --json for the machine-readable form)
 screentime status
 
-# Ignore downtime (grant access until next scheduled window)
+# Apply the schedule right now (cron does this every minute)
+screentime reconcile
+
+# Ignore downtime (devices allowed until the next window opens)
 screentime ignore-downtime
 
-# Turn on downtime immediately
+# Turn on downtime (devices blocked until the current window closes)
 screentime turn-on-downtime
 
 # Clear override and revert to normal schedule
