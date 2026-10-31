@@ -1,11 +1,11 @@
 #!/bin/sh
+# shellcheck source-path=SCRIPTDIR
 # Test suite for the screentime engine (engine functions + decide.awk), run with a faked
 # clock, UCI dump, nft, conntrack and ip. Requires sh, awk and node.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=tests/lib.sh
+PKG="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib.sh
 . "$SCRIPT_DIR/lib.sh"
-PKG="$REPO_ROOT/luci-app-screentime"
 ENGINE="$PKG/root/usr/bin/screentime"
 
 TEST_TMP=$(mktemp -d)
@@ -175,7 +175,7 @@ reconcile
 assert_eq "missing table is recreated even if state unchanged" yes "$([ -f "$TEST_TMP/table" ] && echo yes)"
 assert_eq "recreating the table does not flush flows" "nft apply" "$(cat "$CALLS")"
 rm -f "$CALLS" "$STATE_FILE" "$TEST_TMP/table"
-SCREENTIME_CLOCK="mon 100 1000"
+export SCREENTIME_CLOCK="mon 100 1000"
 reconcile
 assert_eq "clock before NTP sync changes nothing" "" "$(cat "$CALLS" 2>/dev/null)$([ -f "$TEST_TMP/table" ] && echo table)"
 assert_eq "lock is released after reconcile" no "$([ -d "$LOCK_DIR" ] && echo yes || echo no)"
@@ -201,14 +201,14 @@ assert_eq "valid MAC accepted" yes "$(mac_valid 00:11:22:AA:bb:cc && echo yes)"
 assert_eq "invalid MAC rejected" no "$(mac_valid 00:11:22 && echo yes || echo no)"
 
 echo "-> JSON configuration contracts"
-cd "$REPO_ROOT" || exit 1
+cd "$PKG" || exit 1
 node -e '
 const fs = require("fs");
-const menu = JSON.parse(fs.readFileSync("luci-app-screentime/root/usr/share/luci/menu.d/luci-app-screentime.json", "utf8"));
+const menu = JSON.parse(fs.readFileSync("root/usr/share/luci/menu.d/luci-app-screentime.json", "utf8"));
 if (!menu["admin/services/screentime"]) throw new Error("Missing menu entry");
 if (menu["admin/services/screentime"].action.type !== "view") throw new Error("Invalid menu action type");
 
-const acl = JSON.parse(fs.readFileSync("luci-app-screentime/root/usr/share/rpcd/acl.d/luci-app-screentime.json", "utf8"));
+const acl = JSON.parse(fs.readFileSync("root/usr/share/rpcd/acl.d/luci-app-screentime.json", "utf8"));
 if (!acl["luci-app-screentime"]) throw new Error("Missing ACL root");
 const readAcl = acl["luci-app-screentime"].read;
 const writeAcl = acl["luci-app-screentime"].write;

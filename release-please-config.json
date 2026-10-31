@@ -1,16 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
+  "last-release-sha": "6e097258c9c038b6ac3b6b46a78c814611000db0",
   "packages": {
-    ".": {
-      "package-name": "openwrt-packages",
-      "include-component-in-tag": false,
+    "luci-app-screentime": {
       "release-type": "simple",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
-      "tag-format": "v${version}",
-      "extra-files": [
-        "luci-app-screentime/Makefile"
-      ]
+      "extra-files": ["Makefile"]
     }
   }
 }

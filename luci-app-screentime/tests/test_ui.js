@@ -10,7 +10,7 @@ String.prototype.format = function() {
 	return this.replace(/%[sd]/g, function() { return args[i++]; });
 };
 const src = fs.readFileSync(path.join(__dirname, '..',
-	'luci-app-screentime/htdocs/luci-static/resources/screentime/format.js'), 'utf8');
+	'htdocs/luci-static/resources/screentime/format.js'), 'utf8');
 const fmt = new Function('baseclass', '_', src)({ extend: function(o) { return o; } }, function(s) { return s; });
 
 let passed = 0;
