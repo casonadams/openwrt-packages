@@ -1,4 +1,13 @@
 #!/bin/sh
-/etc/init.d/screentime enable
-/etc/init.d/screentime start
+# Drop rules written by releases that used fw4 UCI rules.
+legacy=$(uci -q show firewall | awk -F= '$1 ~ /^firewall\.screentime_[^.]*$/ {sub(/^firewall\./, "", $1); print $1}')
+if [ -n "$legacy" ]; then
+	for sec in $legacy; do
+		uci -q delete firewall."$sec"
+	done
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+fi
+/etc/init.d/screentime enable >/dev/null 2>&1
+/etc/init.d/screentime restart >/dev/null 2>&1
 exit 0

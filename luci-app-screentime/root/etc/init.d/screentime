@@ -1,23 +1,29 @@
 #!/bin/sh /etc/rc.common
-# /etc/init.d/screentime
-# OpenWrt procd service for Screen Time & Parental Controls
+# Screen Time: reconcile the schedule every minute and whenever NTP sets the clock.
 
 # shellcheck disable=SC2034
 START=95
 STOP=10
 USE_PROCD=1
 
+CRON_FILE=/etc/crontabs/root
+
+set_cron() {
+	mkdir -p /etc/crontabs
+	touch "$CRON_FILE"
+	sed -i '/screentime/d' "$CRON_FILE"
+	[ "$1" = on ] && echo '* * * * * /usr/bin/screentime reconcile >/dev/null 2>&1' >> "$CRON_FILE"
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+
 start_service() {
-	/usr/bin/screentime sync
+	set_cron on
+	/usr/bin/screentime reconcile
 }
 
 stop_service() {
-	uci -q delete firewall.screentime_allow
-	uci -q delete firewall.screentime_block
-	uci commit firewall
-	fw4 reload >/dev/null 2>&1
-	sed -i '/screentime/d' /etc/crontabs/root 2>/dev/null
-	/etc/init.d/cron restart >/dev/null 2>&1
+	set_cron off
+	/usr/bin/screentime teardown
 }
 
 service_triggers() {
@@ -25,5 +31,5 @@ service_triggers() {
 }
 
 reload_service() {
-	/usr/bin/screentime sync
+	/usr/bin/screentime reconcile
 }

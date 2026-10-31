@@ -1,557 +1,270 @@
 #!/bin/sh
 # /usr/bin/screentime
-# Backend engine for luci-app-screentime
-# Implements Apple Screen Time "Ignore Downtime Until Schedule" and "Turn On Downtime Until Schedule"
+# Backend for luci-app-screentime: managed devices have network access only inside
+# scheduled windows. decide.awk is the single source of truth for "allowed now";
+# this script applies its answer as an nft set and tears down flows of newly blocked devices.
 
-CRON_FILE="/etc/crontabs/root"
-OVERRIDE_FILE="/etc/screentime.override"
+DECIDE_AWK="${SCREENTIME_DECIDE:-/usr/share/screentime/decide.awk}"
+OVERRIDE_FILE="${OVERRIDE_FILE:-/etc/screentime.override}"
+STATE_FILE="${STATE_FILE:-/tmp/screentime.blocked}"
+LOCK_DIR="${LOCK_DIR:-/tmp/screentime.lock}"
+LEASES_FILE="${LEASES_FILE:-/tmp/dhcp.leases}"
+TABLE="screentime"
+MIN_EPOCH=1700000000	# earlier than this means NTP has not set the clock yet
 
-parse_time() {
-	# Fast path for standard HH:MM:SS format
-	case "$1" in
-		[0-2][0-9]:[0-5][0-9]:[0-5][0-9]) echo "$1"; return ;;
-	esac
-	raw=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
-	is_pm=0; is_am=0
-	case "$raw" in
-		*pm) is_pm=1; raw=${raw%pm} ;;
-		*am) is_am=1; raw=${raw%am} ;;
-	esac
-	h=${raw%%:*}
-	rem=${raw#*:}
-	if [ "$rem" != "$raw" ]; then
-		m=${rem%%:*}
-		s=${rem#*:}
-		[ "$s" = "$rem" ] && s=0
+config_dump() {
+	if [ -n "$UCI_CONFIG_DIR" ]; then
+		uci -c "$UCI_CONFIG_DIR" -q show screentime
 	else
-		m=0; s=0
-	fi
-	[ -z "$h" ] && h=0
-	[ -z "$m" ] && m=0
-	[ -z "$s" ] && s=0
-	if [ "$is_pm" -eq 1 ] && [ "$h" -lt 12 ]; then
-		h=$((h + 12))
-	elif [ "$is_am" -eq 1 ] && [ "$h" -eq 12 ]; then
-		h=0
-	fi
-	printf "%02d:%02d:%02d" "$h" "$m" "$s"
-}
-
-calc_stop_time() {
-	start_time="$1"
-	duration="$2"
-	[ -z "$duration" ] && duration=90
-
-	start_time=$(parse_time "$start_time")
-	h=${start_time%%:*}
-	h=${h#0}; [ -z "$h" ] && h=0
-	rem=${start_time#*:}
-	m=${rem%%:*}
-	m=${m#0}; [ -z "$m" ] && m=0
-
-	total_min=$((h * 60 + m + duration))
-	stop_h=$(( (total_min / 60) % 24 ))
-	stop_m=$((total_min % 60))
-	printf "%02d:%02d:00" "$stop_h" "$stop_m"
-}
-
-init_config() {
-	if [ ! -f /etc/config/screentime ]; then
-		touch /etc/config/screentime
-		uci set screentime.settings=settings
-		uci set screentime.settings.enabled='1'
-		uci set screentime.schedule_a=schedule
-		uci set screentime.schedule_a.enabled='1'
-		uci set screentime.schedule_a.start_time='18:00:00'
-		uci set screentime.schedule_a.duration='90'
-		uci set screentime.schedule_a.stop_time='19:30:00'
-		uci add_list screentime.schedule_a.weekdays='all'
-		uci commit screentime
+		uci -q show screentime
 	fi
 }
 
-get_devices() {
-	init_config
-	uci show screentime 2>/dev/null | grep -E "=device$" | while read -r line; do
-		sec=${line#*.}
-		sec=${sec%%=*}
-		dev_enabled=$(uci -q get screentime."$sec".enabled || echo "1")
-		[ "$dev_enabled" = "0" ] && continue
-		mac=$(uci -q get screentime."$sec".mac | tr '[:upper:]' '[:lower:]')
-		if [ -n "$mac" ] && echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
-			name=$(uci -q get screentime."$sec".name)
-			if [ -z "$name" ]; then
-				name=$(awk -v m="$mac" '$2 == m {print $4; exit}' /tmp/dhcp.leases 2>/dev/null)
-			fi
-			[ -z "$name" ] && name="Device ($mac)"
-			echo "$name|$mac"
+# Prints "<dow> <seconds since midnight> <epoch>"; SCREENTIME_CLOCK overrides it for tests.
+clock() {
+	if [ -n "$SCREENTIME_CLOCK" ]; then
+		echo "$SCREENTIME_CLOCK"
+		return
+	fi
+	date '+%a %H %M %S %s' | awk '{print tolower($1), $2 * 3600 + $3 * 60 + $4, $5}'
+}
+
+# Sets OVR_MODE (none|ignore|forced) and OVR_LEFT; an expired or malformed file is removed.
+read_override() {
+	OVR_MODE=none
+	OVR_LEFT=0
+	[ -r "$OVERRIDE_FILE" ] || return 0
+	read -r ovr_mode ovr_expiry < "$OVERRIDE_FILE"
+	case "$ovr_mode" in
+		ignore | forced) ;;
+		*) rm -f "$OVERRIDE_FILE"; return 0 ;;
+	esac
+	case "$ovr_expiry" in
+		'' | *[!0-9]*) rm -f "$OVERRIDE_FILE"; return 0 ;;
+	esac
+	if [ "$ovr_expiry" -gt "$1" ]; then
+		OVR_MODE=$ovr_mode
+		OVR_LEFT=$((ovr_expiry - $1))
+	else
+		rm -f "$OVERRIDE_FILE"
+	fi
+}
+
+load_state() {
+	# shellcheck disable=SC2046
+	set -- $(clock)
+	CLK_DOW=$1
+	CLK_SEC=$2
+	CLK_EPOCH=$3
+	read_override "$CLK_EPOCH"
+}
+
+decide() {
+	config_dump | awk -v fmt="$1" -v dow="$CLK_DOW" -v sec="$CLK_SEC" -v epoch="$CLK_EPOCH" \
+		-v ovr="$OVR_MODE" -v left="$OVR_LEFT" -f "$DECIDE_AWK"
+}
+
+lock() {
+	tries=0
+	while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+		tries=$((tries + 1))
+		if [ "$tries" -gt 10 ]; then
+			rmdir "$LOCK_DIR" 2>/dev/null	# stale lock from a killed run
+			tries=0
 		fi
+		sleep 1
 	done
+	trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 }
 
-get_ip_for_mac() {
-	target_mac=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-	ip=$(awk -v mac="$target_mac" '$2 == mac {print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
-	if [ -z "$ip" ]; then
-		ip=$(ip -4 neigh 2>/dev/null | awk -v mac="$target_mac" '$5 == mac {print $1; exit}')
-	fi
-	echo "$ip"
+unlock() {
+	rmdir "$LOCK_DIR" 2>/dev/null
+	trap - EXIT
+}
+
+# MAC -> every known IPv4/IPv6 address, one per line
+ips_for_mac() {
+	{
+		awk -v m="$1" '$2 == m {print $3}' "$LEASES_FILE" 2>/dev/null
+		ip neigh 2>/dev/null | awk -v m="$1" '{for (i = 1; i < NF; i++) if ($i == "lladdr" && tolower($(i + 1)) == m) print $1}'
+	} | sort -u
 }
 
 flush_flows() {
-	get_devices | while IFS='|' read -r _ mac; do
-		ip=$(get_ip_for_mac "$mac")
-		if [ -n "$ip" ] && command -v conntrack >/dev/null 2>&1; then
-			conntrack -D -s "$ip" >/dev/null 2>&1
-			conntrack -D -d "$ip" >/dev/null 2>&1
-		fi
-	done
-}
-
-clean_firewall_rules() {
-	uci show firewall 2>/dev/null | grep -E '^firewall\.screentime_' | cut -d. -f2 | cut -d= -f1 | sort -u | while read -r sec; do
-		uci -q delete firewall."$sec"
-	done
-}
-
-get_override_state() {
-	if [ -f "$OVERRIDE_FILE" ]; then
-		val=$(tr -d ' \r\n' < "$OVERRIDE_FILE" 2>/dev/null)
-		case "$val" in
-			ignore_downtime|forced_downtime) echo "$val" ;;
-			*) echo "none" ;;
-		esac
-	else
-		echo "none"
-	fi
-}
-
-# Determine if current time falls within any active schedule window
-is_currently_in_window() {
-	cur_day=$(date +%a)
-	eval "$(date '+now_h=%H now_m=%M now_s=%S')"
-	now_h=${now_h#0}; [ -z "$now_h" ] && now_h=0
-	now_m=${now_m#0}; [ -z "$now_m" ] && now_m=0
-	now_s=${now_s#0}; [ -z "$now_s" ] && now_s=0
-	now_sec=$((now_h * 3600 + now_m * 60 + now_s))
-
-	rm -f /tmp/screentime_match
-	uci show screentime 2>/dev/null | grep -E "=schedule$" | while read -r line; do
-		sec=${line#*.}
-		sec=${sec%%=*}
-		sec_enabled=$(uci -q get screentime."$sec".enabled || echo "1")
-		[ "$sec_enabled" = "0" ] && continue
-
-		# Check weekday match
-		days=$(uci -q get screentime."$sec".weekdays)
-		match_day=0
-		if [ -z "$days" ] || [ "$days" = "all" ]; then
-			match_day=1
-		else
-			for d in $days; do
-				if [ "$d" = "all" ] || [ "$d" = "$cur_day" ]; then
-					match_day=1
-					break
-				fi
-			done
-		fi
-		[ "$match_day" = "0" ] && continue
-
-		start_t=$(uci -q get screentime."$sec".start_time || echo "18:00:00")
-		start_t=$(parse_time "$start_t")
-		dur=$(uci -q get screentime."$sec".duration || echo "90")
-
-		s_h=${start_t%%:*}
-		s_h=${s_h#0}; [ -z "$s_h" ] && s_h=0
-		s_rem=${start_t#*:}
-		s_m=${s_rem%%:*}
-		s_m=${s_m#0}; [ -z "$s_m" ] && s_m=0
-		s_sec=$((s_h * 3600 + s_m * 60))
-		e_sec=$((s_sec + dur * 60))
-
-		if [ "$now_sec" -ge "$s_sec" ] && [ "$now_sec" -lt "$e_sec" ]; then
-			touch /tmp/screentime_match
-			break
-		fi
-	done
-
-	if [ -f /tmp/screentime_match ]; then
-		rm -f /tmp/screentime_match
-		return 0 # True: inside schedule window
-	else
-		return 1 # False: in downtime
-	fi
-}
-
-get_current_effective_status() {
-	override=$(get_override_state)
-	if [ "$override" = "ignore_downtime" ]; then
-		echo "allowed"
-	elif [ "$override" = "forced_downtime" ]; then
-		echo "downtime"
-	elif is_currently_in_window; then
-		echo "allowed"
-	else
-		echo "downtime"
-	fi
-}
-
-sync_firewall() {
-	init_config
-	CFG_ENABLED=$(uci -q get screentime.settings.enabled || echo "1")
-
-	clean_firewall_rules
-
-	if [ "$CFG_ENABLED" != "1" ]; then
-		uci commit firewall
-		fw4 reload >/dev/null 2>&1
-		update_cron
-		return
-	fi
-
-	override=$(get_override_state)
-
-	# 1. If "Ignore Downtime Until Schedule" is active:
-	# Devices have full internet access (no blocking rules)
-	if [ "$override" = "ignore_downtime" ]; then
-		uci commit firewall
-		fw4 reload >/dev/null 2>&1
-		update_cron
-		return
-	fi
-
-	# 2. If "Turn On Downtime Until Schedule" is active:
-	# Force immediate lockdown (block rule active now)
-	if [ "$override" = "forced_downtime" ]; then
-		uci set firewall.screentime_block=rule
-		uci set firewall.screentime_block.name='ScreenTime_Block'
-		uci set firewall.screentime_block.src='lan'
-		uci set firewall.screentime_block.dest='wan'
-		uci set firewall.screentime_block.target='REJECT'
-		get_devices | while IFS='|' read -r _ mac; do
-			uci add_list firewall.screentime_block.src_mac="$mac"
+	command -v conntrack >/dev/null 2>&1 || return 0
+	for mac in "$@"; do
+		for ip in $(ips_for_mac "$mac"); do
+			case "$ip" in *:*) fam="-f ipv6" ;; *) fam="-f ipv4" ;; esac
+			# shellcheck disable=SC2086
+			conntrack $fam -D -s "$ip" >/dev/null 2>&1
+			# shellcheck disable=SC2086
+			conntrack $fam -D -d "$ip" >/dev/null 2>&1
 		done
-		uci commit firewall
-		fw4 reload >/dev/null 2>&1
-		flush_flows
-		update_cron
-		return
-	fi
-
-	# 3. Normal schedule: ALLOW windows, then default REJECT
-	rule_idx=1
-	uci show screentime 2>/dev/null | grep -E "=schedule$" | while read -r line; do
-		sec=${line#*.}
-		sec=${sec%%=*}
-		sec_enabled=$(uci -q get screentime."$sec".enabled || echo "1")
-		[ "$sec_enabled" = "0" ] && continue
-
-		start_t=$(uci -q get screentime."$sec".start_time || echo "18:00:00")
-		start_t=$(parse_time "$start_t")
-
-		dur=$(uci -q get screentime."$sec".duration)
-		if [ -n "$dur" ] && [ "$dur" -gt 0 ] 2>/dev/null; then
-			stop_t=$(calc_stop_time "$start_t" "$dur")
-			uci set screentime."$sec".stop_time="$stop_t"
-		else
-			stop_t=$(uci -q get screentime."$sec".stop_time || echo "19:30:00")
-			stop_t=$(parse_time "$stop_t")
-		fi
-
-		rule_name="screentime_allow_${rule_idx}"
-		uci set firewall."$rule_name"=rule
-		uci set "firewall.${rule_name}.name=ScreenTime_Allow_${sec}"
-		uci set firewall."$rule_name".src='lan'
-		uci set firewall."$rule_name".dest='wan'
-		uci set firewall."$rule_name".target='ACCEPT'
-		uci set firewall."$rule_name".start_time="$start_t"
-		uci set firewall."$rule_name".stop_time="$stop_t"
-
-		days=$(uci -q get screentime."$sec".weekdays)
-		if [ -n "$days" ] && [ "$days" != "all" ]; then
-			for d in $days; do
-				[ "$d" != "all" ] && uci add_list firewall."$rule_name".weekdays="$d"
-			done
-		fi
-
-		target_devs=$(uci -q get screentime."$sec".devices)
-		if [ -z "$target_devs" ] || [ "$target_devs" = "all" ]; then
-			get_devices | while IFS='|' read -r _ mac; do
-				uci add_list firewall."$rule_name".src_mac="$mac"
-			done
-		else
-			for dev_item in $target_devs; do
-				if [ "$dev_item" = "all" ]; then
-					get_devices | while IFS='|' read -r _ mac; do
-						uci add_list firewall."$rule_name".src_mac="$mac"
-					done
-					break
-				else
-					dev_mac=$(echo "$dev_item" | tr '[:upper:]' '[:lower:]')
-					uci add_list firewall."$rule_name".src_mac="$dev_mac"
-				fi
-			done
-		fi
-
-		rule_idx=$((rule_idx + 1))
 	done
-
-	# Catch-all block rule
-	uci set firewall.screentime_block=rule
-	uci set firewall.screentime_block.name='ScreenTime_Block'
-	uci set firewall.screentime_block.src='lan'
-	uci set firewall.screentime_block.dest='wan'
-	uci set firewall.screentime_block.target='REJECT'
-	get_devices | while IFS='|' read -r _ mac; do
-		uci add_list firewall.screentime_block.src_mac="$mac"
-	done
-
-	uci commit screentime
-	uci commit firewall
-	fw4 reload >/dev/null 2>&1
-	update_cron
 }
 
-weekday_to_cron() {
-	case "$1" in
-		Sun|sun) echo "0" ;;
-		Mon|mon) echo "1" ;;
-		Tue|tue) echo "2" ;;
-		Wed|wed) echo "3" ;;
-		Thu|thu) echo "4" ;;
-		Fri|fri) echo "5" ;;
-		Sat|sat) echo "6" ;;
-		*) echo "*" ;;
-	esac
+# Atomically replaces our private nft table; fw4 is never touched.
+apply_ruleset() {
+	elements=$(printf '%s\n' "$1" | awk 'NF {printf "%s%s", sep, $1; sep = ", "}')
+	set_elements=""
+	[ -n "$elements" ] && set_elements="elements = { $elements }"
+	nft -f - <<EOF
+table inet $TABLE
+delete table inet $TABLE
+table inet $TABLE {
+	set blocked {
+		type ether_addr
+		$set_elements
+	}
+	chain forward {
+		type filter hook forward priority -1; policy accept;
+		ether saddr @blocked reject
+	}
+}
+EOF
 }
 
-update_cron() {
-	init_config
-	CFG_ENABLED=$(uci -q get screentime.settings.enabled || echo "1")
+# Blocked MACs in $1 that were not blocked in $2
+newly_blocked() {
+	{ printf '%s\n@@\n%s\n' "$2" "$1"; } | awk '/^@@$/ {cur = 1; next} !cur {old[$0]; next} $0 != "" && !($0 in old)'
+}
 
-	mkdir -p /etc/crontabs
-	touch "$CRON_FILE"
-	sed -i '/screentime/d' "$CRON_FILE"
-
-	if [ "$CFG_ENABLED" = "1" ]; then
-		uci show screentime 2>/dev/null | grep -E "=schedule$" | while read -r line; do
-			sec=${line#*.}
-			sec=${sec%%=*}
-			sec_enabled=$(uci -q get screentime."$sec".enabled || echo "1")
-			[ "$sec_enabled" = "0" ] && continue
-
-			start_t=$(uci -q get screentime."$sec".start_time || echo "18:00:00")
-			start_h=${start_t%%:*}
-			start_h=${start_h#0}; [ -z "$start_h" ] && start_h=0
-			start_rem=${start_t#*:}
-			start_m=${start_rem%%:*}
-			start_m=${start_m#0}; [ -z "$start_m" ] && start_m=0
-
-			stop_t=$(uci -q get screentime."$sec".stop_time || echo "19:30:00")
-			stop_h=${stop_t%%:*}
-			stop_h=${stop_h#0}; [ -z "$stop_h" ] && stop_h=0
-			stop_rem=${stop_t#*:}
-			stop_m=${stop_rem%%:*}
-			stop_m=${stop_m#0}; [ -z "$stop_m" ] && stop_m=0
-
-			days=$(uci -q get screentime."$sec".weekdays)
-			cron_days="*"
-			if [ -n "$days" ] && [ "$days" != "all" ]; then
-				c_list=""
-				for d in $days; do
-					cn=$(weekday_to_cron "$d")
-					c_list="${c_list}${cn},"
-				done
-				cron_days=${c_list%,}
-			fi
-
-			# At start time: transition point, resets any active override
-			echo "$start_m $start_h * * $cron_days /usr/bin/screentime on-schedule-boundary >/dev/null 2>&1" >> "$CRON_FILE"
-
-			# At stop time: transition point, resets any active override & flushes active flows
-			echo "$stop_m $stop_h * * $cron_days /usr/bin/screentime on-schedule-boundary >/dev/null 2>&1" >> "$CRON_FILE"
-		done
+reconcile() {
+	lock
+	load_state
+	if [ "$CLK_EPOCH" -ge "$MIN_EPOCH" ]; then
+		blocked=$(decide lines | awk -F'|' '$1 == "D" && $3 == 0 {print $2}' | sort)
+		prev=$(cat "$STATE_FILE" 2>/dev/null)
+		if [ "$blocked" != "$prev" ] || ! nft list table inet "$TABLE" >/dev/null 2>&1; then
+			apply_ruleset "$blocked" || { unlock; return 1; }
+			printf '%s\n' "$blocked" > "$STATE_FILE"
+			# shellcheck disable=SC2046
+			flush_flows $(newly_blocked "$blocked" "$prev")
+		fi
 	fi
-
-	/etc/init.d/cron restart >/dev/null 2>&1
+	unlock
 }
 
-# Called automatically when any schedule start or stop time arrives
-cmd_on_boundary() {
-	if [ -f "$OVERRIDE_FILE" ]; then
-		rm -f "$OVERRIDE_FILE"
-	fi
-	sync_firewall
-	if ! is_currently_in_window; then
-		flush_flows
-	fi
-}
-
-cmd_ignore_downtime() {
-	echo "ignore_downtime" > "$OVERRIDE_FILE"
-	sync_firewall
-	echo "Ignore Downtime Until Schedule engaged."
+# Override ends at the next change of the global window state: an ignored downtime
+# resumes when the next window opens, a forced downtime ends when the window closes.
+set_override() {
+	load_state
+	OVR_MODE=none
+	OVR_LEFT=0
+	next=$(decide lines | awk -F'|' '$1 == "G" {print $4}')
+	[ "${next:--1}" -lt 0 ] && next=86400
+	echo "$1 $((CLK_EPOCH + next))" > "$OVERRIDE_FILE"
+	reconcile
 	cmd_status
 }
 
-cmd_turn_on_downtime() {
-	echo "forced_downtime" > "$OVERRIDE_FILE"
-	sync_firewall
-	flush_flows
-	echo "Turn On Downtime Until Schedule engaged."
-	cmd_status
-}
-
-cmd_clear_override() {
-	rm -f "$OVERRIDE_FILE"
-	sync_firewall
-	if ! is_currently_in_window; then
-		flush_flows
-	fi
-	echo "Override cleared. Reverted to normal schedule."
-	cmd_status
-}
-
-cmd_get_state() {
-	override=$(get_override_state)
-	status=$(get_current_effective_status)
-	echo "$status|$override"
+fmt_duration() {
+	[ "$1" -lt 0 ] && { echo "-"; return; }
+	echo "$1" | awk '{h = int($1 / 3600); m = int(($1 % 3600) / 60); printf "%dh %02dm", h, m}'
 }
 
 cmd_status() {
-	init_config
-	zonename=$(uci -q get system.@system[0].zonename || echo "UTC")
-	CFG_ENABLED=$(uci -q get screentime.settings.enabled || echo "1")
-	override=$(get_override_state)
-	eff_status=$(get_current_effective_status)
+	load_state
+	zone=$(uci -q get system.@system[0].zonename || echo UTC)
+	decision=$(decide lines)
+	in_window=$(printf '%s\n' "$decision" | awk -F'|' '$1 == "G" {print $3}')
+	enabled=$(printf '%s\n' "$decision" | awk -F'|' '$1 == "G" {print $2}')
 
-	echo "=========================================================="
-	echo "                OpenWrt Screen Time Status                "
-	echo "=========================================================="
-	echo "Router Clock   : $(date '+%Y-%m-%d %I:%M:%S %p') ($zonename)"
-
-	printf '%s' "Current State  : "
-	if [ "$eff_status" = "downtime" ]; then
-		if [ "$override" = "forced_downtime" ]; then
-			echo "DOWNTIME (Turned On Until Next Schedule)"
-		else
-			echo "DOWNTIME (Outside Scheduled Hours)"
-		fi
+	echo "Router Clock : $(date '+%Y-%m-%d %I:%M:%S %p') ($zone)"
+	if [ "$enabled" = 0 ]; then
+		echo "State        : DISABLED (all devices allowed)"
+	elif [ "$OVR_MODE" = ignore ]; then
+		echo "State        : DOWNTIME IGNORED for $(fmt_duration "$OVR_LEFT")"
+	elif [ "$OVR_MODE" = forced ]; then
+		echo "State        : DOWNTIME FORCED for $(fmt_duration "$OVR_LEFT")"
+	elif [ "$in_window" = 1 ]; then
+		echo "State        : INSIDE a scheduled window"
 	else
-		if [ "$override" = "ignore_downtime" ]; then
-			echo "INTERNET ALLOWED (Downtime Ignored Until Next Schedule)"
-		else
-			echo "INTERNET ALLOWED (Inside Scheduled Hours)"
-		fi
+		echo "State        : DOWNTIME (outside scheduled windows)"
 	fi
-	echo "----------------------------------------------------------"
-	echo "Configured Schedules:"
-	uci show screentime 2>/dev/null | grep -E "=schedule$" | while read -r line; do
-		sec=${line#*.}
-		sec=${sec%%=*}
-		sec_enabled=$(uci -q get screentime."$sec".enabled || echo "1")
-		start_t=$(uci -q get screentime."$sec".start_time || echo "18:00:00")
-		stop_t=$(uci -q get screentime."$sec".stop_time || echo "19:30:00")
-		dur=$(uci -q get screentime."$sec".duration || echo "?")
-		days=$(uci -q get screentime."$sec".weekdays || echo "all")
-		st_str="ENABLED"
-		[ "$sec_enabled" = "0" ] && st_str="DISABLED"
-		printf "  [%s] %s -> %s (%s min) Days: %s\n" "$st_str" "$start_t" "$stop_t" "$dur" "$days"
-	done
+	printf '%-24s %-19s %-9s %s\n' "Device" "MAC" "Status" "Next change"
+	while IFS='|' read -r kind mac allowed _ change name; do
+		[ "$kind" = D ] || continue
+		label=BLOCKED
+		[ "$allowed" = 1 ] && label=ALLOWED
+		printf '%-24s %-19s %-9s %s\n' "${name:-Device}" "$mac" "$label" "$(fmt_duration "$change")"
+	done <<EOF
+$decision
+EOF
+}
 
-	echo "----------------------------------------------------------"
-	printf "%-24s %-19s %-16s %-10s\n" "Device Name" "MAC Address" "IP Address" "Status"
-	printf "%-24s %-19s %-16s %-10s\n" "------------------------" "-------------------" "----------------" "---------"
-
-	get_devices | while IFS='|' read -r name mac; do
-		ip=$(get_ip_for_mac "$mac")
-		[ -z "$ip" ] && ip="(offline)"
-
-		status="BLOCKED"
-		if [ "$eff_status" = "allowed" ]; then
-			status="ALLOWED"
-		fi
-		printf "%-24s %-19s %-16s %-10s\n" "$name" "$mac" "$ip" "$status"
-	done
-	echo "=========================================================="
+mac_valid() {
+	echo "$1" | grep -Eq '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'
 }
 
 cmd_add_device() {
-	if [ -z "$1" ]; then
-		echo "Usage: screentime add-device [\"Device Name\"] <MAC_ADDRESS>"
+	if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+		echo 'Usage: screentime add-device ["Device Name"] <MAC_ADDRESS>' >&2
 		exit 1
 	fi
-	if [ -z "$2" ]; then
-		mac=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-		name=""
-	else
-		name="$1"
-		mac=$(echo "$2" | tr '[:upper:]' '[:lower:]')
-	fi
-	if ! echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
-		echo "Error: Invalid MAC address format: '$mac'"
-		exit 1
-	fi
+	if [ $# -eq 1 ]; then name=""; mac=$1; else name=$1; mac=$2; fi
+	mac_valid "$mac" || { echo "Error: invalid MAC address '$mac'" >&2; exit 1; }
+	mac=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
 
-	init_config
 	sec="dev_$(echo "$mac" | tr -d ':')"
 	uci set screentime."$sec"=device
 	[ -n "$name" ] && uci set screentime."$sec".name="$name"
 	uci set screentime."$sec".mac="$mac"
-	uci set screentime."$sec".enabled='1'
+	uci set screentime."$sec".enabled=1
 	uci commit screentime
-
-	sync_firewall
-	echo "Added '${name:-$mac}' ($mac)."
+	reconcile
 	cmd_status
 }
 
 cmd_remove_device() {
-	if [ -z "$1" ]; then
-		echo "Usage: screentime remove-device <MAC_ADDRESS or Name>"
-		exit 1
-	fi
+	[ $# -eq 1 ] || { echo "Usage: screentime remove-device <MAC_ADDRESS or Name>" >&2; exit 1; }
 	target=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-
-	uci show screentime 2>/dev/null | grep -E "=device$" | while read -r line; do
-		sec=${line#*.}
-		sec=${sec%%=*}
-		name=$(uci -q get screentime."$sec".name || echo "Unnamed Device")
+	for sec in $(uci -q show screentime | awk -F'[.=]' '$3 == "device" {print $2}'); do
 		mac=$(uci -q get screentime."$sec".mac | tr '[:upper:]' '[:lower:]')
+		name=$(uci -q get screentime."$sec".name | tr '[:upper:]' '[:lower:]')
 		if [ "$mac" = "$target" ] || [ "$name" = "$target" ]; then
 			uci -q delete screentime."$sec"
-			uci commit screentime
 		fi
 	done
-
-	sync_firewall
+	uci commit screentime
+	reconcile
 	cmd_status
 }
 
+cmd_status_json() {
+	load_state
+	decide json
+}
+
+# Remove everything reconcile creates at runtime (the override file is user state; the
+# package pre-deinstall script removes it).
+cmd_teardown() {
+	nft delete table inet "$TABLE" 2>/dev/null
+	rm -f "$STATE_FILE"
+	rmdir "$LOCK_DIR" 2>/dev/null
+}
+
 case "$1" in
-	status)                   cmd_status ;;
-	ignore-downtime)          cmd_ignore_downtime ;;
-	turn-on-downtime)         cmd_turn_on_downtime ;;
-	clear-override)           cmd_clear_override ;;
-	on-schedule-boundary)     cmd_on_boundary ;;
-	get-state)                cmd_get_state ;;
-	add-device)               shift; cmd_add_device "$@" ;;
-	remove-device)            shift; cmd_remove_device "$@" ;;
-	sync)                     sync_firewall ;;
-	commit)                   uci -q commit screentime ;;
-	revert)                   uci -q revert screentime ;;
-	flush-flows)              flush_flows ;;
+	status)           if [ "$2" = "--json" ]; then cmd_status_json; else cmd_status; fi ;;
+	reconcile | sync) reconcile ;;
+	ignore-downtime)  set_override ignore ;;
+	turn-on-downtime) set_override forced ;;
+	clear-override)   rm -f "$OVERRIDE_FILE"; reconcile; cmd_status ;;
+	add-device)       shift; cmd_add_device "$@" ;;
+	remove-device)    shift; cmd_remove_device "$@" ;;
+	teardown)         cmd_teardown ;;
 	*)
-		echo "Usage: screentime <command> [arguments]"
-		echo ""
-		echo "Commands:"
-		echo "  status                  Show current status, clock, and override state"
-		echo "  ignore-downtime         Ignore downtime until the next scheduled boundary"
-		echo "  turn-on-downtime        Turn on downtime immediately until the next schedule"
-		echo "  clear-override          Clear active override and resume normal schedule"
-		echo "  get-state               Machine-readable current state (status|override)"
-		echo "  add-device <name> <mac> Add a target device"
-		echo "  remove-device <name>    Remove a target device"
-		echo "  sync                    Sync firewall rules with configuration"
+		cat <<EOF
+Usage: screentime <command> [arguments]
+
+  status [--json]          Current state and per-device status
+  reconcile                Apply the schedule now (also run every minute by cron)
+  ignore-downtime          Allow devices until the next window opens
+  turn-on-downtime         Block devices until the current window closes
+  clear-override           Drop any override and resume the schedule
+  add-device [name] <mac>  Manage a device
+  remove-device <mac|name> Stop managing a device
+  teardown                 Remove the nft table and runtime state
+EOF
 		;;
 esac

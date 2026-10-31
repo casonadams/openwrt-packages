@@ -1,0 +1,3 @@
+#!/bin/sh
+[ "$ACTION" = stratum ] && /usr/bin/screentime reconcile
+exit 0

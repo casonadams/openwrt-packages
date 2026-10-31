@@ -16,14 +16,12 @@
 			},
 			"uci": [
 				"screentime",
-				"system",
-				"firewall"
+				"system"
 			]
 		},
 		"write": {
 			"uci": [
-				"screentime",
-				"firewall"
+				"screentime"
 			],
 			"ubus": {
 				"service": [
