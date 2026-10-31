@@ -36,6 +36,7 @@ familydns.@device[0]=device
 familydns.@device[0].name=Kid "One" <iPhone>
 familydns.@device[0].client_id=kid1
 familydns.@device[0].profile=kids
+familydns.@device[0].lan_ip=192.168.1.50
 familydns.@device[1]=device
 familydns.@device[1].name=Dad
 familydns.@device[1].client_id=dad
@@ -82,12 +83,20 @@ assert_eq "days_until in the future" 90 "$(days_until 2027-01-29T18:47:40Z 2026-
 assert_eq "days_until across a leap day" 366 "$(days_until 2028-03-01T00:00:00Z 2027-03-01)"
 assert_eq "days_until when expired" -3 "$(days_until 2026-10-28T00:00:00Z 2026-10-31)"
 
+for good in 192.168.1.50 10.0.0.0/8 255.255.255.255/32; do
+	assert_eq "valid LAN id $good" yes "$(valid_lan_id "$good" && echo yes || echo no)"
+done
+for bad in '' 192.168.1 192.168.1.256 192.168.1.1/33 192.168.1.1/ abc 1.2.3.4.5 ' 1.2.3.4'; do
+	assert_eq "invalid LAN id '$bad'" no "$(valid_lan_id "$bad" && echo yes || echo no)"
+done
+
 echo "-> client JSON"
 kid=$(client_json '@device[0]')
 dad=$(client_json '@device[1]')
 assert_eq "kid JSON is valid even with quotes in the name" yes "$(json_ok "$kid")"
 assert_eq "name is preserved" 'Kid "One" <iPhone>' "$(json_get "$kid" name)"
-assert_eq "client id becomes the AdGuard id" '["kid1"]' "$(json_get "$kid" ids)"
+assert_eq "client id and LAN address become the AdGuard ids" '["kid1","192.168.1.50"]' "$(json_get "$kid" ids)"
+assert_eq "a device without a LAN address only has its client id" '["dad"]' "$(json_get "$dad" ids)"
 assert_eq "kids profile turns on safe search" true "$(json_get "$kid" safe_search.youtube)"
 assert_eq "kids profile turns on parental" true "$(json_get "$kid" parental_enabled)"
 assert_eq "kids profile blocks services" '["tiktok","roblox"]' "$(json_get "$kid" blocked_services)"
@@ -141,6 +150,7 @@ assert_eq "progress JSON is valid" yes "$(json_ok "$(progress_json)")"
 assert_eq "progress JSON carries the error message" "no certificate" "$(json_get "$(progress_json)" message)"
 for s in $STAGES; do progress_set "$s" ok ""; done
 assert_eq "all ok is ok" ok "$(progress_overall)"
-assert_eq "all five stages are listed" 5 "$(json_get "$(progress_json)" stages.length)"
+assert_eq "all six stages are listed" 6 "$(json_get "$(progress_json)" stages.length)"
+assert_eq "network DNS is the last stage" lan "$(json_get "$(progress_json)" 'stages[5].name')"
 
 summary

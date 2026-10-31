@@ -52,6 +52,28 @@ EOT
 	echo "OK rules: ${rules:-0}"
 	[ "${rules:-0}" -gt 0 ] || grep -i error /tmp/agh.log | tail -3 | cut -c1-300
 	;;
+lan)
+	load_engine
+	uci set familydns.settings.lan_dns=1
+	uci set familydns.settings.lan_profile=kids
+	uci commit familydns
+	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
+	echo "safesearch: $(agh_get /control/safesearch/status | jsonfilter -e '@.enabled')"
+	echo "parental: $(agh_get /control/parental/status | jsonfilter -e '@.enabled')"
+	echo "safebrowsing: $(agh_get /control/safebrowsing/status | jsonfilter -e '@.enabled')"
+	echo "ptr: $(agh_get /control/dns_info | jsonfilter -e '@.local_ptr_upstreams[*]' | tr '\n' ' ')"
+	echo "lan rule count: $(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | grep -c '^\[/lan/\]127.0.0.1:53$')"
+	echo "redirect: '$(uci -q get firewall.familydns_lan_dns)' to port '$(uci -q get firewall.familydns_lan_dns.dest_port)' proto '$(uci -q get firewall.familydns_lan_dns.proto)'"
+	stage_lan >/dev/null
+	echo "lan rule count after a second run: $(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | grep -c '^\[/lan/\]127.0.0.1:53$')"
+	;;
+lan-off)
+	load_engine
+	uci set familydns.settings.lan_dns=0
+	uci commit familydns
+	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
+	echo "redirect after off: '$(uci -q get firewall.familydns_lan_dns)'"
+	;;
 status) familydns status ;;
 profile) familydns profile kid1 --lock ;;
 querylog)

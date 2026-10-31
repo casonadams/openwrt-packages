@@ -3,9 +3,12 @@
 
 const CERT_WARN_DAYS = 14;
 const IDLE_POLL_MS = 30000;
+const STAGE_ORDER = [ 'ddns', 'cert', 'agh', 'firewall', 'clients', 'lan' ];
 const CLIENT_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.duckdns\.org$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
+const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const LAN_IP_RE = new RegExp('^' + OCTET + '(?:\\.' + OCTET + '){3}(?:\\/(?:3[0-2]|[12]?\\d))?$');
 const SERVICES = {
 	tiktok: 'TikTok', youtube: 'YouTube', instagram: 'Instagram', facebook: 'Facebook',
 	snapchat: 'Snapchat', twitter: 'Twitter / X', discord: 'Discord', roblox: 'Roblox',
@@ -20,9 +23,18 @@ function hasOwn(obj, key) {
 function stageLabel(name) {
 	const labels = {
 		ddns: _('DynDNS'), cert: _('Certificate'), agh: _('AdGuard Home'),
-		firewall: _('Firewall'), clients: _('Devices')
+		firewall: _('Firewall'), clients: _('Devices'), lan: _('Network DNS')
 	};
 	return hasOwn(labels, name) ? labels[name] : name;
+}
+
+function stageRank(name) {
+	const i = STAGE_ORDER.indexOf(name);
+	return i < 0 ? STAGE_ORDER.length : i;
+}
+
+function orderStages(stages) {
+	return stages.slice().sort(function(a, b) { return stageRank(a.name) - stageRank(b.name); });
 }
 
 function isRunning(status) {
@@ -31,6 +43,33 @@ function isRunning(status) {
 
 function stageView(stage) {
 	return { name: stage.name, label: stageLabel(stage.name), state: stage.state, message: stage.message || '' };
+}
+
+function describeLan(lan) {
+	if (!lan || !lan.enabled)
+		return { kind: 'off', text: _('Network DNS: off') };
+	if (lan.active)
+		return { kind: 'ready', text: _('Network DNS: via AdGuard Home') };
+	return { kind: 'warning', text: _('Network DNS: waiting for AdGuard Home - using router DNS') };
+}
+
+function joinNames(names) {
+	if (names.length <= 1)
+		return names.join('');
+	return names.slice(0, -1).join(', ') + ' ' + _('and') + ' ' + names[names.length - 1];
+}
+
+function retiredNote(lan) {
+	if (!lan || !lan.enabled || !lan.retired || lan.retired.length === 0)
+		return '';
+	const names = joinNames(lan.retired);
+	return lan.retired.length === 1
+		? _('%s is paused while this is on').format(names)
+		: _('%s are paused while this is on').format(names);
+}
+
+function lanDnsDescription() {
+	return _('All LAN DNS, including devices with hardcoded DNS servers, is redirected to AdGuard Home. adblock and https-dns-proxy are paused while this is on.');
 }
 
 function problemFor(status, port) {
@@ -59,7 +98,7 @@ function describeState(status, port) {
 	if (!status)
 		return { kind: 'error', text: _('Could not read the Family DNS status from the router.'), stages: [] };
 	const progress = status.progress || {};
-	const stages = (progress.stages || []).map(stageView);
+	const stages = orderStages((progress.stages || []).map(stageView));
 	if (progress.running) {
 		const current = stages.find(function(s) { return s.state === 'running'; });
 		return {
@@ -133,6 +172,14 @@ function validPort(port) {
 	return /^\d+$/.test(s) && Number(s) >= 1 && Number(s) <= 65535;
 }
 
+function validLanIp(value) {
+	return LAN_IP_RE.test(String(value || ''));
+}
+
+function validUpstream(value) {
+	return typeof value === 'string' && /^\S+$/.test(value);
+}
+
 function isDuplicate(id, others) {
 	return (others || []).indexOf(id) >= 0;
 }
@@ -146,7 +193,22 @@ function mobileconfigFilename(clientId) {
 }
 
 function profileArgs(clientId, locked) {
-	return ['profile', clientId].concat(locked ? ['--lock'] : []);
+	return [ 'profile', clientId ].concat(locked ? [ '--lock' ] : []);
+}
+
+function parseAdminJson(text) {
+	let doc;
+	try {
+		doc = JSON.parse(text);
+	} catch (e) {
+		return null;
+	}
+	if (!doc || typeof doc !== 'object')
+		return null;
+	const ok = function(v) { return typeof v === 'string' && v.length > 0; };
+	if (!ok(doc.url) || !ok(doc.username) || !ok(doc.password))
+		return null;
+	return { url: doc.url, username: doc.username, password: doc.password };
 }
 
 function hasPendingChanges(changes) {
@@ -175,19 +237,27 @@ function serviceOptions(extra) {
 }
 
 return baseclass.extend({
+	STAGE_ORDER: STAGE_ORDER.slice(),
 	describeState: describeState,
 	describeCert: describeCert,
 	describeDevice: describeDevice,
+	describeLan: describeLan,
+	retiredNote: retiredNote,
+	lanDnsDescription: lanDnsDescription,
+	orderStages: orderStages,
 	isRunning: isRunning,
 	validClientId: validClientId,
 	slugify: slugify,
 	validDomain: validDomain,
 	validEmail: validEmail,
 	validPort: validPort,
+	validLanIp: validLanIp,
+	validUpstream: validUpstream,
 	isDuplicate: isDuplicate,
 	dotHostname: dotHostname,
 	mobileconfigFilename: mobileconfigFilename,
 	profileArgs: profileArgs,
+	parseAdminJson: parseAdminJson,
 	hasPendingChanges: hasPendingChanges,
 	canBootstrap: canBootstrap,
 	shouldFetch: shouldFetch,

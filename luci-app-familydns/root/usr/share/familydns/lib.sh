@@ -60,6 +60,16 @@ days_until() {
 		}'
 }
 
+# valid_lan_id 192.168.1.50 | 192.168.1.0/24
+valid_lan_id() {
+	printf '%s\n' "$1" | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ {
+		n = split($0, a, /[.\/]/)
+		for (i = 1; i <= 4; i++) if (a[i] > 255) exit 1
+		if (n == 5 && a[5] > 32) exit 1
+		ok = 1
+	} END {exit !ok}'
+}
+
 profile_flag() {
 	if [ "$(uci_q get "familydns.$1.$2")" = 1 ]; then echo true; else echo false; fi
 }
@@ -77,7 +87,10 @@ client_json() {
 	done
 	use_global=true
 	[ -n "$services" ] && use_global=false
-	printf '{"name":"%s","ids":["%s"],"tags":[],"upstreams":[],' "$(json_escape "$name")" "$(json_escape "$id")"
+	ids="\"$(json_escape "$id")\""
+	lan=$(uci_q get "familydns.$sec.lan_ip")
+	if [ -n "$lan" ] && valid_lan_id "$lan"; then ids="$ids,\"$(json_escape "$lan")\""; fi
+	printf '{"name":"%s","ids":[%s],"tags":[],"upstreams":[],' "$(json_escape "$name")" "$ids"
 	printf '"filtering_enabled":%s,"parental_enabled":%s,"safebrowsing_enabled":%s,"safesearch_enabled":%s,' \
 		"$(profile_flag "$prof" filtering)" "$(profile_flag "$prof" parental)" "$(profile_flag "$prof" safebrowsing)" "$ss"
 	printf '"safe_search":{"enabled":%s,"bing":%s,"duckduckgo":%s,"ecosia":%s,"google":%s,"pixabay":%s,"yandex":%s,"youtube":%s},' \

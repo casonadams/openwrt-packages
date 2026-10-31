@@ -29,6 +29,17 @@ function fetchStatus() {
 	}).catch(function() { return null; });
 }
 
+function fetchAdmin() {
+	return callExec(ENGINE, [ 'admin' ]).then(function(res) {
+		if (res.code !== 0)
+			throw commandError(res);
+		const creds = fmt.parseAdminJson(res.stdout);
+		if (!creds)
+			throw new Error(_('Unexpected response from the router'));
+		return creds;
+	});
+}
+
 function notifyError(err) {
 	ui.addNotification(null, E('p', _('Operation failed: %s').format(err.message || err)));
 }
@@ -65,6 +76,34 @@ function confirmLocked(clientId) {
 			}, _('Download locked profile'))
 		])
 	]);
+}
+
+function copyPassword(password) {
+	navigator.clipboard.writeText(password).then(function() {
+		ui.addNotification(null, E('p', _('Password copied to the clipboard.')), 'info');
+	}, notifyError);
+}
+
+// Credentials live only in this DOM subtree; they are never logged or stored.
+function renderLogin(creds, onClose) {
+	const masked = '••••••••';
+	let shown = false;
+	const pw = E('code', {}, masked);
+	const reveal = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Show password'));
+	reveal.addEventListener('click', function() {
+		shown = !shown;
+		pw.textContent = shown ? creds.password : masked;
+		reveal.textContent = shown ? _('Hide password') : _('Show password');
+	});
+	const copy = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Copy password'));
+	copy.addEventListener('click', function() { copyPassword(creds.password); });
+	const close = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Hide login'));
+	close.addEventListener('click', onClose);
+	return [
+		E('div', {}, [ _('Username: '), E('code', {}, creds.username) ]),
+		E('div', { 'style': 'margin-top:4px;' }, [ _('Password: '), pw, ' ', reveal, ' ', copy ]),
+		E('div', { 'style': 'margin-top:6px;' }, [ close ])
+	];
 }
 
 function badge(text, kind) {
@@ -109,10 +148,39 @@ return view.extend({
 			'class': 'cbi-section',
 			'style': 'margin-bottom:16px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;'
 		});
+		const loginBox = E('div', {
+			'class': 'cbi-section',
+			'style': 'margin-bottom:16px;padding:12px 16px;display:none;'
+		});
+
+		const hideLogin = function() {
+			dom.content(loginBox, []);
+			loginBox.style.display = 'none';
+		};
+
+		const showLogin = function() {
+			return fetchAdmin().then(function(creds) {
+				dom.content(loginBox, [ E('strong', {}, _('AdGuard Home login')) ].concat(renderLogin(creds, hideLogin)));
+				loginBox.style.display = '';
+			}).catch(notifyError);
+		};
+
+		const adminButtons = function() {
+			const open = E('a', {
+				'class': 'btn cbi-button cbi-button-action important',
+				'href': state.agh.admin_url,
+				'target': '_blank',
+				'rel': 'noopener noreferrer'
+			}, _('Open AdGuard Home'));
+			const login = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Show login'));
+			login.addEventListener('click', ui.createHandlerFn(self, showLogin));
+			return E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:6px;' }, [ open, login ]);
+		};
 
 		const paintHeader = function() {
 			const desc = fmt.describeState(state, port());
-			const children = [ badge(desc.text, desc.kind) ];
+			const lan = fmt.describeLan(state && state.lan);
+			const children = [ badge(desc.text, desc.kind), badge(lan.text, lan.kind) ];
 			if (fmt.isRunning(state) && desc.stages.length) {
 				children.push(E('ul', { 'style': 'flex-basis:100%;margin:0;font-size:12px;' }, desc.stages.map(function(s) {
 					return E('li', {}, s.label + ': ' + s.state + (s.message ? ' – ' + s.message : ''));
@@ -123,6 +191,13 @@ return view.extend({
 					'WAN ' + (state.wan_ip || '–') + ' · DynDNS ' + (state.ddns_ip || '–') + ' · ' +
 					_('Certificate') + ': ' + fmt.describeCert(state.cert)));
 			}
+			const retired = fmt.retiredNote(state && state.lan);
+			if (retired)
+				children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' }, retired));
+			if (state && state.agh && state.agh.running)
+				children.push(adminButtons());
+			else
+				hideLogin();
 			dom.content(header, children);
 		};
 
@@ -186,7 +261,7 @@ return view.extend({
 		s.render = function() {
 			paintHeader();
 			poll.add(tick, TICK_SECONDS);
-			return header;
+			return E('div', {}, [ header, loginBox ]);
 		};
 
 		s = m.section(form.NamedSection, 'settings', 'settings', _('Setup'),
@@ -220,6 +295,23 @@ return view.extend({
 		o.default = DEFAULT_PORT;
 		o.validate = function(_section_id, value) {
 			return fmt.validPort(value) ? true : _('Expecting a port between 1 and 65535');
+		};
+
+		o = s.option(form.Flag, 'lan_dns', _('Use AdGuard Home for this network\'s DNS'));
+		o.description = fmt.lanDnsDescription();
+		o.default = '0';
+
+		o = s.option(form.ListValue, 'lan_profile', _('Network profile'));
+		o.description = _('Profile whose filters apply to every LAN device while the option above is on.');
+		o.default = 'adult';
+		profiles.forEach(function(p) { o.value(p.id, p.label); });
+
+		o = s.option(form.DynamicList, 'upstream', _('Upstream DNS servers (optional)'));
+		o.description = _('Examples: https://dns10.quad9.net/dns-query or tls://one.one.one.one. Leave empty to keep the current AdGuard Home upstreams.');
+		o.placeholder = 'https://dns10.quad9.net/dns-query';
+		o.rmempty = true;
+		o.validate = function(_section_id, value) {
+			return fmt.validUpstream(value) ? true : _('Enter one server per entry, without spaces');
 		};
 
 		o = s.option(form.DummyValue, '_setup', _('Setup'));
@@ -308,6 +400,14 @@ return view.extend({
 			return profileIds.indexOf(value) >= 0 ? true : _('Choose an existing profile');
 		};
 
+		o = s.option(form.Value, 'lan_ip', _('LAN address'));
+		o.placeholder = '192.168.1.50/32';
+		o.rmempty = true;
+		o.validate = function(_section_id, value) {
+			if (!value) return true;
+			return fmt.validLanIp(value) ? true : _('Expecting an IPv4 address, optionally with /0-32 (e.g. 192.168.1.50/32)');
+		};
+
 		o = s.option(form.DummyValue, '_status', _('Status'));
 		o.renderWidget = function(section_id) {
 			const el = E('span', {
@@ -346,11 +446,13 @@ return view.extend({
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			return E('div', { 'class': 'cbi-section-descr' }, [
-				E('p', {}, _('Each device resolves DNS over TLS at <client-id>.<domain>:<port> (shown in the table above).')),
+				E('p', {}, _('Each device resolves DNS over TLS at <client-id>.<domain>:<port> (shown in the table above). Save & Apply your changes before downloading a profile.')),
+				E('p', {}, _('iPhone setup:')),
 				E('ol', {}, [
-					E('li', {}, _('Save & Apply your changes, then click Install profile (or Locked profile) and save the .mobileconfig file.')),
-					E('li', {}, _('AirDrop the file to the iPhone and open it, or open it from Files.')),
-					E('li', {}, _('Go to Settings > General > VPN & Device Management, tap the profile and choose Install.'))
+					E('li', {}, _('Click Install profile (this downloads <client-id>.mobileconfig) and AirDrop the file to the iPhone, or open this page in Safari on the iPhone and tap Install profile.')),
+					E('li', {}, _('Tap the downloaded file, then go to Settings > General > VPN & Device Management, tap the profile and choose Install (enter the passcode).')),
+					E('li', {}, _('Important: go to Settings > General > VPN & Device Management > DNS and select this profile. Unsupervised iPhones must enable it; supervised iPhones activate it automatically.')),
+					E('li', {}, _('To remove: Settings > General > VPN & Device Management > the profile > Remove Profile. A Locked profile cannot be removed on a supervised iPhone.'))
 				])
 			]);
 		};

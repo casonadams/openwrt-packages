@@ -15,7 +15,7 @@ PROGRESS_FILE="${PROGRESS_FILE:-/tmp/familydns.progress}"
 PID_FILE="${PID_FILE:-/tmp/familydns.pid}"
 LOCK_DIR="${LOCK_DIR:-/tmp/familydns.lock}"
 AGH_DNS_PORT="${AGH_DNS_PORT:-5300}"
-STAGES="ddns cert agh firewall clients"
+STAGES="ddns cert agh firewall clients lan"
 UPSTREAM_DNS="1.1.1.1"
 
 setting() {
@@ -309,6 +309,8 @@ stage_clients() {
 	for sec in $(device_sections); do
 		id=$(uci_q get "familydns.$sec.client_id")
 		valid_client_id "$id" || { MSG="device '$id' has an invalid client id"; return 1; }
+		lan=$(uci_q get "familydns.$sec.lan_ip")
+		[ -z "$lan" ] || valid_lan_id "$lan" || { MSG="device '$id' has an invalid LAN address '$lan'"; return 1; }
 		wanted="$wanted $id"
 		existing=$(agh_client_name_for "$id")
 		if [ -n "$existing" ]; then
@@ -324,6 +326,140 @@ stage_clients() {
 	: > "$(managed_file)"
 	for id in $wanted; do echo "$id" >> "$(managed_file)"; done
 	MSG="devices applied"
+}
+
+# --- stage: lan (use AdGuard Home for the whole network) --------------------
+
+lan_domain() {
+	d=$(uci_q get "dhcp.@dnsmasq[0].domain")
+	echo "${d:-lan}"
+}
+
+agh_listening() {
+	netstat -lun 2>/dev/null | grep -q ":$AGH_DNS_PORT "
+}
+
+dns_config_body() {
+	ups=$(setting upstream)
+	[ -n "$ups" ] || ups=$(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | tr '\n' ' ')
+	rule="[/$(lan_domain)/]127.0.0.1:53"
+	case " $ups " in *" $rule "*) ;; *) ups="$ups $rule" ;; esac
+	list=""
+	for u in $ups; do list="$list${list:+,}\"$(json_escape "$u")\""; done
+	printf '{"upstream_dns":[%s],"local_ptr_upstreams":["127.0.0.1:53"],"use_private_ptr_resolvers":true,"resolve_clients":true}' "$list"
+}
+
+agh_switch() {
+	action=disable
+	[ "$2" = true ] && action=enable
+	agh_post "/control/$1/$action" '{}' >/dev/null
+}
+
+apply_global_profile() {
+	p=$(setting lan_profile)
+	p=${p:-adult}
+	if [ -z "$(uci_q get "familydns.$p")" ]; then
+		MSG="network profile '$p' does not exist"
+		return 1
+	fi
+	services=""
+	for svc in $(uci_q get "familydns.$p.blocked_services"); do
+		services="$services${services:+,}\"$(json_escape "$svc")\""
+	done
+	agh_post /control/filtering/config "{\"enabled\":$(profile_flag "$p" filtering),\"interval\":24}" >/dev/null || return 1
+	agh_switch safesearch "$(profile_flag "$p" safe_search)" || return 1
+	agh_switch safebrowsing "$(profile_flag "$p" safebrowsing)" || return 1
+	agh_switch parental "$(profile_flag "$p" parental)" || return 1
+	agh_post /control/blocked_services/set "[$services]" >/dev/null
+}
+
+retired_file() { echo "$STATE_DIR/retired"; }
+
+retire_legacy() {
+	mkdir -p "$STATE_DIR"
+	touch "$(retired_file)"
+	for svc in adblock https-dns-proxy; do
+		[ -x "/etc/init.d/$svc" ] || continue
+		was_enabled=0
+		"/etc/init.d/$svc" enabled && was_enabled=1
+		[ "$was_enabled" = 1 ] || pidof "$svc" >/dev/null 2>&1 || continue
+		grep -q "^$svc " "$(retired_file)" || echo "$svc $was_enabled" >> "$(retired_file)"
+		"/etc/init.d/$svc" stop >/dev/null 2>&1
+		[ "$was_enabled" = 1 ] && "/etc/init.d/$svc" disable >/dev/null 2>&1
+	done
+	return 0
+}
+
+restore_legacy() {
+	[ -s "$(retired_file)" ] || return 0
+	while read -r svc was_enabled; do
+		[ "$was_enabled" = 1 ] && "/etc/init.d/$svc" enable >/dev/null 2>&1
+		"/etc/init.d/$svc" start >/dev/null 2>&1
+	done < "$(retired_file)"
+	: > "$(retired_file)"
+}
+
+lan_redirect_present() {
+	[ "$(uci_q get firewall.familydns_lan_dns)" = redirect ]
+}
+
+lan_redirect_on() {
+	TOUCHED=""
+	set_opt firewall.familydns_lan_dns redirect
+	set_opt firewall.familydns_lan_dns.name FamilyDNS-LAN-DNS
+	set_opt firewall.familydns_lan_dns.src lan
+	set_opt firewall.familydns_lan_dns.proto "tcp udp"
+	set_opt firewall.familydns_lan_dns.src_dport 53
+	set_opt firewall.familydns_lan_dns.dest_port "$AGH_DNS_PORT"
+	set_opt firewall.familydns_lan_dns.target DNAT
+	[ -z "$TOUCHED" ] && return 0
+	commit_touched
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+lan_redirect_off() {
+	lan_redirect_present || return 0
+	uci_q delete firewall.familydns_lan_dns
+	uci_q commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+lan_off() {
+	lan_redirect_off
+	restore_legacy
+}
+
+stage_lan() {
+	if [ "$(setting lan_dns)" != 1 ]; then
+		lan_off
+		MSG="off"
+		return 0
+	fi
+	if ! wait_for agh_ready 30; then
+		MSG="AdGuard Home is not ready"
+		return 1
+	fi
+	agh_post /control/dns_config "$(dns_config_body)" >/dev/null || { MSG="could not set AdGuard Home upstreams"; return 1; }
+	apply_global_profile || { [ -n "$MSG" ] || MSG="could not apply the network profile"; return 1; }
+	retire_legacy
+	if agh_listening; then
+		lan_redirect_on
+		MSG="network DNS goes through AdGuard Home"
+	else
+		lan_redirect_off
+		MSG="AdGuard Home is not listening; the router keeps its own DNS"
+		return 1
+	fi
+}
+
+# Fail open: keep the redirect only while AdGuard Home is actually listening.
+cmd_watch() {
+	[ -e "$STATE_DIR/configured" ] && [ "$(setting lan_dns)" = 1 ] || return 0
+	if agh_listening; then
+		lan_redirect_present || lan_redirect_on
+	else
+		lan_redirect_off
+	fi
 }
 
 # --- orchestration ---------------------------------------------------------
@@ -376,6 +512,13 @@ cmd_reconcile() {
 	wait_for agh_ready 30 && ensure_tls
 	stage_firewall
 	stage_clients
+	stage_lan
+}
+
+cmd_admin() {
+	[ -r "$AGH_DIR/admin.pass" ] || { echo "AdGuard Home is not set up" >&2; return 1; }
+	cred=$(cat "$AGH_DIR/admin.pass")
+	printf '{"url":"%s","username":"%s","password":"%s"}\n' "$(agh_url)" "$(json_escape "${cred%%:*}")" "$(json_escape "${cred#*:}")"
 }
 
 cmd_profile() {
@@ -400,6 +543,7 @@ cmd_profile() {
 
 cmd_teardown() {
 	/etc/init.d/familydns stop >/dev/null 2>&1
+	lan_off
 	uci_q delete firewall.familydns_dot && uci_q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1
 	uci_q delete ddns.familydns && uci_q commit ddns && /etc/init.d/ddns restart >/dev/null 2>&1
 	uci_q delete acme.familydns && uci_q commit acme
@@ -469,6 +613,16 @@ devices_json() {
 	printf ']'
 }
 
+lan_json() {
+	enabled=false
+	[ "$(setting lan_dns)" = 1 ] && enabled=true
+	active=false
+	lan_redirect_present && agh_listening && active=true
+	retired=$(awk '{printf "%s\"%s\"", sep, $1; sep = ","}' "$(retired_file)" 2>/dev/null)
+	printf '{"enabled":%s,"active":%s,"profile":"%s","retired":[%s]}' \
+		"$enabled" "$active" "$(json_escape "$(setting lan_profile || echo adult)")" "$retired"
+}
+
 cmd_status() {
 	wan=$(ifstatus wan 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
 	ddns=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
@@ -495,6 +649,8 @@ cmd_status() {
 		"$(bool sh -c "netstat -ltn 2>/dev/null | grep -q ':$(dot_port) '")" "$(agh_url)"
 	printf '"firewall_open":%s,"progress":' "$fw"
 	progress_json
+	printf ',"lan":'
+	lan_json
 	printf ',"devices":'
 	devices_json
 	printf '}\n'
@@ -505,6 +661,8 @@ case "$1" in
 	bootstrap) shift; cmd_bootstrap "$@" ;;
 	sync)      cmd_sync ;;
 	reconcile) cmd_reconcile ;;
+	watch)     cmd_watch ;;
+	admin)     cmd_admin ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
@@ -515,6 +673,8 @@ Usage: familydns <command>
   bootstrap [--background]   Set up DDNS, certificate, AdGuard Home, firewall and devices
   sync                       Apply devices and profiles to AdGuard Home now
   reconcile                  Repair drift (cron hourly and on config change)
+  watch                      Fail open: drop the LAN DNS redirect if AdGuard Home stops (cron, every minute)
+  admin                      Print the AdGuard Home admin URL and login as JSON
   profile <id> [--lock]      Print an Apple DNS-over-TLS .mobileconfig for a device
   teardown                   Remove what bootstrap set up (AdGuard Home itself stays)
 EOF

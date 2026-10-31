@@ -41,6 +41,17 @@ log=$(in_container querylog)
 assert_eq "query log attributes queries to kid1" yes "$(echo "$log" | grep -qw kid1 && echo yes)"
 assert_eq "query log attributes queries to dad" yes "$(echo "$log" | grep -qw dad && echo yes)"
 
+echo "-> Network-wide DNS through AdGuard Home"
+lan=$(in_container lan)
+assert_eq "lan stage succeeds" yes "$(echo "$lan" | grep -q '^OK lan: network DNS goes through AdGuard Home' && echo yes)"
+assert_eq "network profile turns safe search on" "safesearch: true" "$(echo "$lan" | grep '^safesearch')"
+assert_eq "network profile turns parental on" "parental: true" "$(echo "$lan" | grep '^parental')"
+assert_eq "network profile turns safe browsing on" "safebrowsing: true" "$(echo "$lan" | grep '^safebrowsing')"
+assert_eq "local reverse lookups go to dnsmasq" "ptr: 127.0.0.1:53 " "$(echo "$lan" | grep '^ptr')"
+assert_eq "the local domain is forwarded to dnsmasq once" "lan rule count: 1" "$(echo "$lan" | grep '^lan rule count:')"
+assert_eq "a second run does not duplicate it" "lan rule count after a second run: 1" "$(echo "$lan" | grep 'second run')"
+assert_eq "all LAN DNS is redirected to AdGuard Home" "redirect: 'redirect' to port '5300' proto 'tcp udp'" "$(echo "$lan" | grep '^redirect:')"
+
 echo "-> Status and profile"
 status=$(in_container status)
 field() {
@@ -51,13 +62,18 @@ assert_eq "cert is present" true "$(field cert.present)"
 assert_eq "AdGuard Home is running" true "$(field agh.running)"
 assert_eq "DoT is listening" true "$(field agh.dot_listening)"
 assert_eq "firewall rule exists" true "$(field firewall_open)"
+assert_eq "network DNS is on" true "$(field lan.enabled)"
+assert_eq "network DNS is active" true "$(field lan.active)"
 assert_eq "both devices are in AdGuard Home" '[true,true]' "$(field 'devices.map(x => x.in_agh)')"
 assert_eq "device DoT host" kid1.test.duckdns.org "$(field 'devices[0].dot_host')"
 profile=$(in_container profile)
 assert_eq "locked profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
 assert_eq "locked profile is locked" yes "$(echo "$profile" | grep -q '<true/>' && echo yes)"
 
-echo "-> Removing a device and tearing down"
+echo "-> Turning network DNS off, removing a device, tearing down"
+off=$(in_container lan-off)
+assert_eq "lan off succeeds" yes "$(echo "$off" | grep -q '^OK lan: off' && echo yes)"
+assert_eq "the redirect is removed" "redirect after off: ''" "$(echo "$off" | grep '^redirect after off')"
 re=$(in_container resync)
 assert_eq "removed device disappears from AdGuard Home" "dad client name after removal: ''" "$(echo "$re" | sed -n 1p)"
 assert_eq "other devices are untouched" "kid1 client name still present: 'Kid One'" "$(echo "$re" | sed -n 2p)"

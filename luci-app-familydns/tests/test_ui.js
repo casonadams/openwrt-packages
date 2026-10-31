@@ -157,5 +157,75 @@ check('built-in list has 14 services', fmt.serviceOptions([]).length, 14);
 check('stored unknown service is kept', fmt.serviceOptions([ 'mastodon', 'tiktok', 'mastodon' ]).slice(-1),
 	[ { id: 'mastodon', label: 'mastodon' } ]);
 
+console.log('-> network DNS (lan)');
+check('lan off when disabled', fmt.describeLan({ enabled: false, active: false, profile: 'adult', retired: [] }),
+	{ kind: 'off', text: 'Network DNS: off' });
+check('lan off when missing', fmt.describeLan(undefined), { kind: 'off', text: 'Network DNS: off' });
+check('lan active', fmt.describeLan({ enabled: true, active: true, profile: 'adult', retired: [] }),
+	{ kind: 'ready', text: 'Network DNS: via AdGuard Home' });
+check('lan enabled but inactive falls back to router DNS', fmt.describeLan({ enabled: true, active: false, profile: 'adult', retired: [] }),
+	{ kind: 'warning', text: 'Network DNS: waiting for AdGuard Home - using router DNS' });
+check('two retired services are named', fmt.retiredNote({ enabled: true, active: true, retired: [ 'adblock', 'https-dns-proxy' ] }),
+	'adblock and https-dns-proxy are paused while this is on');
+check('one retired service is singular', fmt.retiredNote({ enabled: true, active: true, retired: [ 'adblock' ] }),
+	'adblock is paused while this is on');
+check('three retired services use commas', fmt.retiredNote({ enabled: true, active: true, retired: [ 'a', 'b', 'c' ] }),
+	'a, b and c are paused while this is on');
+check('no retired note while lan is off', fmt.retiredNote({ enabled: false, active: false, retired: [ 'adblock' ] }), '');
+check('no retired note without services', fmt.retiredNote({ enabled: true, active: true, retired: [] }), '');
+check('lan description names devices and paused services',
+	fmt.lanDnsDescription(),
+	'All LAN DNS, including devices with hardcoded DNS servers, is redirected to AdGuard Home. adblock and https-dns-proxy are paused while this is on.');
+
+console.log('-> stage order and labels');
+check('stage order lists lan last', fmt.STAGE_ORDER, [ 'ddns', 'cert', 'agh', 'firewall', 'clients', 'lan' ]);
+check('lan stage label', fmt.describeState(withProgress({ running: true, state: 'running',
+	stages: [ { name: 'lan', state: 'running', message: '' } ] }), '853').text, 'Setting up... Network DNS');
+check('stages are ordered regardless of input order', fmt.orderStages([
+	{ name: 'lan' }, { name: 'agh' }, { name: 'ddns' }, { name: 'clients' }, { name: 'cert' }, { name: 'firewall' }
+]).map(function(s) { return s.name; }), [ 'ddns', 'cert', 'agh', 'firewall', 'clients', 'lan' ]);
+check('unknown stage sorts last', fmt.orderStages([ { name: 'zzz' }, { name: 'ddns' } ]).map(function(s) { return s.name; }),
+	[ 'ddns', 'zzz' ]);
+check('describeState orders stages', fmt.describeState(withProgress({ running: true, state: 'running',
+	stages: [ { name: 'lan', state: 'pending', message: '' }, { name: 'ddns', state: 'running', message: '' } ] }), '853').stages
+	.map(function(s) { return s.name; }), [ 'ddns', 'lan' ]);
+check('lan stage message is shown as label', fmt.describeState(withProgress({ state: 'error',
+	stages: [ { name: 'lan', state: 'error', message: 'redirect failed' } ] }), '853').text,
+	'Setup failed at Network DNS: redirect failed');
+
+console.log('-> LAN addresses');
+check('plain IPv4 is valid', fmt.validLanIp('192.168.1.50'), true);
+check('IPv4 with /32 is valid', fmt.validLanIp('192.168.1.50/32'), true);
+check('IPv4 with /0 is valid', fmt.validLanIp('0.0.0.0/0'), true);
+check('IPv4 with /24 is valid', fmt.validLanIp('10.0.0.0/24'), true);
+check('prefix 33 is invalid', fmt.validLanIp('10.0.0.1/33'), false);
+check('prefix with no digits is invalid', fmt.validLanIp('10.0.0.1/'), false);
+check('octet 256 is invalid', fmt.validLanIp('192.168.1.256'), false);
+check('three octets is invalid', fmt.validLanIp('192.168.1'), false);
+check('five octets is invalid', fmt.validLanIp('1.2.3.4.5'), false);
+check('leading zero octet is invalid', fmt.validLanIp('192.168.01.5'), false);
+check('letters are invalid', fmt.validLanIp('lan.local'), false);
+check('IPv6 is invalid', fmt.validLanIp('fd00::1'), false);
+check('empty is invalid (caller skips optional)', fmt.validLanIp(''), false);
+
+console.log('-> upstream servers');
+check('https upstream is valid', fmt.validUpstream('https://dns10.quad9.net/dns-query'), true);
+check('tls upstream is valid', fmt.validUpstream('tls://one.one.one.one'), true);
+check('upstream with space is invalid', fmt.validUpstream('https://a.example/dns query'), false);
+check('empty upstream is invalid', fmt.validUpstream(''), false);
+check('upstream with tab is invalid', fmt.validUpstream('tls://a\tb'), false);
+
+console.log('-> admin credentials');
+check('admin JSON parses',
+	fmt.parseAdminJson('{"url":"http://192.168.1.1:3001","username":"admin","password":"s3cret"}'),
+	{ url: 'http://192.168.1.1:3001', username: 'admin', password: 's3cret' });
+check('admin JSON ignores extra fields',
+	fmt.parseAdminJson('{"url":"http://192.168.1.1:3001","username":"admin","password":"p","x":1}').username, 'admin');
+check('admin JSON rejects garbage', fmt.parseAdminJson('not json'), null);
+check('admin JSON rejects null', fmt.parseAdminJson('null'), null);
+check('admin JSON rejects missing password', fmt.parseAdminJson('{"url":"http://a:3001","username":"admin"}'), null);
+check('admin JSON rejects empty password', fmt.parseAdminJson('{"url":"http://a:3001","username":"admin","password":""}'), null);
+check('admin JSON rejects non-string username', fmt.parseAdminJson('{"url":"http://a:3001","username":1,"password":"p"}'), null);
+
 console.log('==========================================');
 console.log(' UI results: ' + passed + ' passed');
