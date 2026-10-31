@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.1](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.2.0...luci-app-screentime-v1.2.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **luci-app-screentime:** seed the config on first install only ([706d618](https://github.com/casonadams/openwrt-packages/commit/706d6180f5a9220aca8a4b663af29f8e5b9f8456))
+* release asset upload, config seeding, one-line install docs ([d060e11](https://github.com/casonadams/openwrt-packages/commit/d060e1120683defa7729883a185d8244d70f7e51))
+* **release:** upload release assets with gh instead of passing --clobber after -- ([e8b4256](https://github.com/casonadams/openwrt-packages/commit/e8b42564232931f94ed3094b3f0ab33a98970c52))
+
 ## [1.2.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.1.0...luci-app-screentime-v1.2.0) (2026-10-31)
 
 
