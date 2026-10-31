@@ -87,3 +87,7 @@ ssh root@192.168.1.1 "rm -rf /tmp/luci-* /var/luci-*; /etc/init.d/rpcd restart"
 # Verify engine status and state on router
 ssh root@192.168.1.1 "/usr/bin/screentime status"
 ```
+
+## Form rules
+
+- Form validation rules (blank input, no `required`, pruning blank rows) are in the root `AGENTS.md` section 5; `tests/test_ui.js` enforces them.

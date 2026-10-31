@@ -50,3 +50,14 @@ Optional `postinst` / `prerm` files in the package directory become apk post-ins
 - Shell is POSIX (BusyBox ash) and must pass `shellcheck -x -s sh`.
 - Tests live in `<package>/tests/` with a `run.sh` entry point; CI runs every `luci-app-*/tests/run.sh`.
 - Use documentation MAC addresses (`00:00:5e:00:53:xx`) and generic device names in tests and docs.
+
+## 5. LuCI Form Rules (every `luci-app-*` view)
+
+These bit us twice (screentime's blank MAC rows, familydns' optional upstream list), so they are mandatory:
+
+- **Validators must accept empty input.** LuCI calls `validate` with `''` for blank optional fields, blank `DynamicList` entries and freshly added table rows (the `Add` button saves the whole map). A validator that rejects `''` makes Save fail with "Option ... contains an invalid input value". Write `return fmt.checkOptional(value, isValid, message)` (or `if (!value) return true`).
+- **Never set `required = true`** on options whose defaults are empty; use `rmempty = true` and enforce required values where they are used (the engine's own validation, a disabled "Set up" button), not in the form.
+- **Blank table rows are pruned on an explicit Save**, not on the Add-triggered silent save: `handleSave` sets a `pruneBlank` flag around the stock handler and the section's `parse` removes rows with no meaningful value when it is set.
+- **Custom widgets** (plain DOM, no `ui` element) are never validated by LuCI; check them in the option's `parse`.
+- **LuCI is usually served over plain HTTP**, so `navigator.clipboard` does not exist; copy with a `document.execCommand('copy')` fallback and tell the user honestly when copying fails (a silent failure leaves stale clipboard contents that get pasted by mistake).
+- Each package's `tests/test_ui.js` has a guard that fails when a `.validate` function does not handle blank input or when `required = true` appears; keep it passing and keep pure validation helpers in `format.js` with tests for `''`.

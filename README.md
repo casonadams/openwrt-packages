@@ -7,6 +7,7 @@ Custom OpenWrt packages, published as a signed apk feed for OpenWrt 25+.
 | Package | Description |
 |---|---|
 | [`luci-app-screentime`](luci-app-screentime/) | Schedule-based parental controls: devices are online only during scheduled windows |
+| [`luci-app-familydns`](luci-app-familydns/) | Per-device AdGuard Home profiles over DNS-over-TLS, usable from anywhere (DuckDNS, Let's Encrypt, iOS profiles) |
 
 ## Install
 

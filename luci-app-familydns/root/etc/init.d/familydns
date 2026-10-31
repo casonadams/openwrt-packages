@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# Family DNS: reconcile hourly and whenever the config changes.
+
+# shellcheck disable=SC2034
+START=96
+STOP=10
+USE_PROCD=1
+
+CRON_FILE=/etc/crontabs/root
+
+set_cron() {
+	mkdir -p /etc/crontabs
+	touch "$CRON_FILE"
+	sed -i '/familydns/d' "$CRON_FILE"
+	if [ "$1" = on ]; then
+		echo '17 * * * * /usr/bin/familydns reconcile >/dev/null 2>&1' >> "$CRON_FILE"
+		echo '* * * * * /usr/bin/familydns watch >/dev/null 2>&1' >> "$CRON_FILE"
+	fi
+	/etc/init.d/cron restart >/dev/null 2>&1
+}
+
+start_service() {
+	set_cron on
+	/usr/bin/familydns reconcile
+}
+
+stop_service() {
+	set_cron off
+}
+
+service_triggers() {
+	procd_add_reload_trigger familydns
+}
+
+reload_service() {
+	/usr/bin/familydns reconcile
+}

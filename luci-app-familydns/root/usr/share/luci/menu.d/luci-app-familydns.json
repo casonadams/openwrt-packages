@@ -1,0 +1,15 @@
+{
+	"admin/services/familydns": {
+		"title": "Family DNS",
+		"order": 86,
+		"action": {
+			"type": "view",
+			"path": "familydns/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-familydns"
+			]
+		}
+	}
+}

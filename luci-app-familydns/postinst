@@ -1,0 +1,8 @@
+#!/bin/sh
+# Package post-install: run first-boot defaults now.
+if [ -x /etc/uci-defaults/99_familydns ]; then
+	/etc/uci-defaults/99_familydns && rm -f /etc/uci-defaults/99_familydns
+fi
+rm -rf /tmp/luci-* /var/luci-* 2>/dev/null
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
+exit 0

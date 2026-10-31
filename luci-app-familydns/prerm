@@ -1,0 +1,5 @@
+#!/bin/sh
+# Package pre-deinstall: undo what the setup created before the files go away.
+/usr/bin/familydns teardown >/dev/null 2>&1
+/etc/init.d/familydns disable >/dev/null 2>&1
+exit 0

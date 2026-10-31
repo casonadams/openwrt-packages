@@ -1,0 +1,21 @@
+{
+	"luci-app-familydns": {
+		"description": "Grant UCI and engine access for Family DNS",
+		"read": {
+			"uci": [
+				"familydns",
+				"system"
+			]
+		},
+		"write": {
+			"uci": [
+				"familydns"
+			],
+			"file": {
+				"/usr/bin/familydns": [
+					"exec"
+				]
+			}
+		}
+	}
+}
