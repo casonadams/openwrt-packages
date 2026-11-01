@@ -26,6 +26,7 @@ setup)
 	uci set familydns.broken.name=Broken
 	uci set familydns.broken.filtering=0
 	uci add_list familydns.broken.upstream=127.0.0.1:9
+	uci -q delete familydns.settings.fallback
 	uci add_list familydns.settings.fallback=9.9.9.9
 	for d in "Kid One|kid1|kids" "Dad|dad|adult" "Kid Two|kid2|broken"; do
 		IFS='|' read -r n i p <<EOT
