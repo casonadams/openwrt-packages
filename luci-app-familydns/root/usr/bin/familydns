@@ -95,20 +95,34 @@ commit_touched() {
 	for cfg in $(printf '%s\n' $TOUCHED | sort -u); do uci_q commit "$cfg"; done
 }
 
+duckdns_resolvable() { nslookup www.duckdns.org 127.0.0.1 >/dev/null 2>&1; }
+
 ensure_duckdns_resolvable() {
-	nslookup www.duckdns.org 127.0.0.1 >/dev/null 2>&1 && return 0
+	duckdns_resolvable && return 0
 	rule="/www.duckdns.org/$UPSTREAM_DNS"
 	uci_q get "dhcp.@dnsmasq[0].server" | grep -qF "$rule" ||
 		uci_q add_list "dhcp.@dnsmasq[0].server=$rule"
 	uci_q commit dhcp
 	/etc/init.d/dnsmasq reload >/dev/null 2>&1
 	touch "$STATE_DIR/dnsmasq-workaround"
-	sleep 2
+	killall -HUP dnsmasq 2>/dev/null
+	wait_for duckdns_resolvable 15
 }
 
 duckdns_update() {
-	reply=$(wget -qO- -T20 "https://www.duckdns.org/update?domains=$1&token=$(setting duckdns_token)&ip=")
-	[ "$reply" = OK ]
+	tries=0
+	reply=""
+	while [ -z "$reply" ] && [ "$tries" -lt 3 ]; do
+		reply=$(wget -qO- -T20 "https://www.duckdns.org/update?domains=$1&token=$(setting duckdns_token)&ip=")
+		tries=$((tries + 1))
+		[ -n "$reply" ] || sleep 3
+	done
+	case "$reply" in
+		OK) return 0 ;;
+		'') MSG="could not reach DuckDNS (check the router's DNS and internet access)" ;;
+		*) MSG="DuckDNS rejected the update (wrong token or name?)" ;;
+	esac
+	return 1
 }
 
 validate_settings() {
@@ -139,7 +153,7 @@ stage_ddns() {
 	commit_touched
 	chmod 600 /etc/config/ddns 2>/dev/null
 	ensure_duckdns_resolvable
-	duckdns_update "$LABEL" || { MSG="DuckDNS rejected the update (wrong token or name?)"; return 1; }
+	duckdns_update "$LABEL" || return 1
 	/etc/init.d/ddns enable >/dev/null 2>&1
 	/etc/init.d/ddns restart >/dev/null 2>&1
 	MSG="record updated"
@@ -578,7 +592,7 @@ cmd_teardown() {
 		/etc/init.d/dnsmasq reload >/dev/null 2>&1
 	fi
 	while read -r id; do delete_client "$id"; done < "$(managed_file)" 2>/dev/null
-	rm -rf "$STATE_DIR" "$PROGRESS_FILE" "$PID_FILE"
+	rm -rf "$STATE_DIR" "$PROGRESS_FILE" "$PID_FILE" /var/run/ddns/familydns.*
 	echo "removed"
 }
 
@@ -657,7 +671,7 @@ cmd_status() {
 	not_after=$(printf '%s' "$tls" | jsonfilter -e '@.not_after' 2>/dev/null)
 	days=""
 	[ -n "$not_after" ] && days=$(days_until "$not_after" "$(date +%Y-%m-%d)")
-	version=$(agh_get /control/status 2>/dev/null | jsonfilter -e '@.version')
+	version=$(agh_get /control/status 2>/dev/null | jsonfilter -e '@.version' 2>/dev/null)
 	staging=false
 	[ "$(setting staging)" = 1 ] && staging=true
 	configured=false

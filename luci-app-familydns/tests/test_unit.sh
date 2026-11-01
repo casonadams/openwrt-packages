@@ -139,6 +139,17 @@ assert_eq "device sections are found" '@device[0] @device[1]' "$(device_sections
 assert_eq "lan ip defaults to 192.168.1.1" 192.168.1.1 "$(lan_ip)"
 assert_eq "lan ip can be overridden" 127.0.0.1 "$(AGH_WEB_IP=127.0.0.1 lan_ip)"
 
+echo "-> DuckDNS update result messages"
+# shellcheck disable=SC2329
+sleep() { :; }
+# shellcheck disable=SC2329
+wget() { printf "%s" "$FAKE_REPLY"; }
+FAKE_REPLY=OK; MSG=""
+assert_eq "an OK reply succeeds" ok "$(duckdns_update example && echo ok)"
+FAKE_REPLY=KO; duckdns_update example; assert_eq "a KO reply blames the token or name" "DuckDNS rejected the update (wrong token or name?)" "$MSG"
+FAKE_REPLY=""; duckdns_update example; assert_eq "an empty reply blames connectivity, not the token" "could not reach DuckDNS (check the router's DNS and internet access)" "$MSG"
+unset -f wget sleep
+
 echo "-> progress"
 assert_eq "no progress file means idle" idle "$(progress_overall)"
 progress_init
