@@ -51,6 +51,7 @@ assert_eq "dad (no profile upstream) uses the global upstream" "dad upstream: 1.
 echo "-> Network-wide DNS through AdGuard Home"
 lan=$(in_container lan)
 assert_eq "lan stage succeeds" yes "$(echo "$lan" | grep -q '^OK lan: network DNS goes through AdGuard Home' && echo yes)"
+assert_eq "ad blocking stays on when the profile's filtering option is absent" "filtering: true" "$(echo "$lan" | grep '^filtering')"
 assert_eq "network profile turns safe search on" "safesearch: true" "$(echo "$lan" | grep '^safesearch')"
 assert_eq "network profile turns parental on" "parental: true" "$(echo "$lan" | grep '^parental')"
 assert_eq "network profile turns safe browsing on" "safebrowsing: true" "$(echo "$lan" | grep '^safebrowsing')"
