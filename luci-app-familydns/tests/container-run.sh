@@ -85,6 +85,10 @@ lan-off)
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
 	echo "redirect after off: '$(uci -q get firewall.familydns_lan_dns)'"
 	;;
+ratelimit)
+	load_engine
+	echo "ratelimit: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit') subnet4: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit_subnet_len_ipv4') subnet6: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit_subnet_len_ipv6')"
+	;;
 status) familydns status ;;
 profile) familydns profile kid1 --lock ;;
 querylog)

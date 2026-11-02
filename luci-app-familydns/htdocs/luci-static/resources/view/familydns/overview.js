@@ -340,6 +340,14 @@ return view.extend({
 			return fmt.checkOptional(value, fmt.validPort, _('Expecting a port between 1 and 65535'));
 		};
 
+		o = s.option(form.Value, 'ratelimit', _('Queries per second per device'));
+		o.placeholder = '500';
+		o.rmempty = true;
+		o.description = _('AdGuard Home drops queries above this rate from one address. Every device is counted on its own. 0 turns the limit off.');
+		o.validate = function(_section_id, value) {
+			return fmt.checkOptional(value, function(v) { return /^\d+$/.test(v); }, _('Expecting a whole number'));
+		};
+
 		o = s.option(form.Flag, 'allow_failover', _('Let iPhones fall back to the network DNS'));
 		o.default = '1';
 		o.rmempty = false;

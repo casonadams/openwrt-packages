@@ -48,6 +48,9 @@ assert_eq "kid1 resolves through its profile's own upstream" "kid1 upstream: 1.0
 assert_eq "the fallback server answered for kid2" "kid2 upstream: 9.9.9.9:53" "$(echo "$log" | grep '^kid2 upstream')"
 assert_eq "dad (no profile upstream) uses the global upstream" "dad upstream: 1.1.1.1:53" "$(echo "$log" | grep '^dad upstream')"
 
+echo "-> Rate limit is per device"
+assert_eq "limit is raised and counted per address" "ratelimit: 500 subnet4: 32 subnet6: 128" "$(in_container ratelimit)"
+
 echo "-> Network-wide DNS through AdGuard Home"
 lan=$(in_container lan)
 assert_eq "lan stage succeeds" yes "$(echo "$lan" | grep -q '^OK lan: network DNS goes through AdGuard Home' && echo yes)"
