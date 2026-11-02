@@ -15,6 +15,7 @@ PROGRESS_FILE="${PROGRESS_FILE:-/tmp/familydns.progress}"
 PID_FILE="${PID_FILE:-/tmp/familydns.pid}"
 LOCK_DIR="${LOCK_DIR:-/tmp/familydns.lock}"
 DNS_PORT="${DNS_PORT:-5300}"
+WEB_PORT="${WEB_PORT:-8083}"
 STAGES="ddns cert dnsdist firewall lan"
 UPSTREAM_DNS="1.1.1.1"
 
@@ -275,7 +276,7 @@ emit_local() {
 	for z in 10 168.192 254.169 $(seq 16 31 | sed 's/$/.172/'); do
 		printf 'localnames:add("%s.in-addr.arpa.")\n' "$z"
 	done
-	echo 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"))'
+	echo 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"), {name="local"})'
 }
 
 # validate_devices: sets SNI_RULES (comma-separated SNIRule(...) list) and PROFILES (every profile in use)
@@ -296,29 +297,51 @@ validate_devices() {
 	done
 }
 
+# The dnsdist API (loopback only) reports per-rule match counts; its key lives next to the other state.
+api_key() {
+	f="$STATE_DIR/api.key"
+	if [ ! -s "$f" ]; then
+		mkdir -p "$STATE_DIR"
+		(umask 077 && head -c 24 /dev/urandom | md5sum | cut -c1-32 > "$f")
+	fi
+	cat "$f"
+}
+
+# rule_counts: "<rule name> <matches>" per line from the dnsdist API; fails when dnsdist is not answering.
+# dnsdist prints each rule's keys alphabetically, so "matches" is always directly followed by "name".
+rule_counts() {
+	body=$(wget -qO- -T3 --header="X-API-Key: $(api_key)" "http://127.0.0.1:$WEB_PORT/api/v1/servers/localhost") || return 1
+	printf '%s' "$body" | grep -o '"matches": *[0-9]*, *"name": *"[^"]*"' | sed 's/^"matches": *\([0-9]*\), *"name": *"\(.*\)"$/\2 \1/'
+}
+
+# sum_counts <rule name> <counts>: total matches of every rule with that name, or nothing when counts is empty
+sum_counts() {
+	printf '%s\n' "$2" | awk -v n="$1" '$1 == n {t += $2; seen = 1} END {if (seen) print t}'
+}
+
 emit_routes() {
 	limit=$(setting ratelimit)
 	limit=${limit:-500}
 	case "$limit" in *[!0-9]*) limit=500 ;; esac
-	[ "$limit" -eq 0 ] || printf 'addAction(MaxQPSIPRule(%s, 32, 128), DropAction())\n' "$limit"
+	[ "$limit" -eq 0 ] || printf 'addAction(MaxQPSIPRule(%s, 32, 128), DropAction(), {name="limited"})\n' "$limit"
 	echo 'local private = newNMG()'
 	for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 127.0.0.0/8 fc00::/7 fe80::/10 ::1/128; do
 		printf 'private:addMask("%s")\n' "$net"
 	done
 	if [ -n "$SNI_RULES" ]; then
-		printf 'addAction(AndRule({NotRule(NetmaskGroupRule(private)), NotRule(OrRule({%s}))}), RCodeAction(DNSRCode.REFUSED))\n' "$SNI_RULES"
+		printf 'addAction(AndRule({NotRule(NetmaskGroupRule(private)), NotRule(OrRule({%s}))}), RCodeAction(DNSRCode.REFUSED), {name="refused"})\n' "$SNI_RULES"
 	else
-		echo 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED))'
+		echo 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED), {name="refused"})'
 	fi
 	emit_local
 	for sec in $(device_sections); do
 		id=$(uci_q get "familydns.$sec.client_id")
 		pool=$(lua_str "$(uci_q get "familydns.$sec.profile")")
-		printf 'addAction(SNIRule(%s), PoolAction(%s))\n' "$(lua_str "$id.$dom")" "$pool"
+		printf 'addAction(SNIRule(%s), PoolAction(%s), {name=%s})\n' "$(lua_str "$id.$dom")" "$pool" "$(lua_str "dev:$id")"
 		lan=$(uci_q get "familydns.$sec.lan_ip")
-		[ -z "$lan" ] || printf 'addAction(NetmaskGroupRule(%s), PoolAction(%s))\n' "$(lua_str "$lan")" "$pool"
+		[ -z "$lan" ] || printf 'addAction(NetmaskGroupRule(%s), PoolAction(%s), {name=%s})\n' "$(lua_str "$lan")" "$pool" "$(lua_str "dev:$id")"
 	done
-	printf 'addAction(AllRule(), PoolAction(%s))\n' "$(lua_str "$(lan_profile)")"
+	printf 'addAction(AllRule(), PoolAction(%s), {name="default"})\n' "$(lua_str "$(lan_profile)")"
 }
 
 # render_dnsdist: the whole dnsdist configuration on stdout. Plain DNS (from the LAN redirect) and public DoT share
@@ -330,6 +353,8 @@ render_dnsdist() {
 	echo 'setServerPolicy(firstAvailable)'
 	echo 'setMaxUDPOutstanding(1024)'
 	echo 'setMaxTCPConnectionsPerClient(50)'
+	printf 'webserver(%s)\n' "$(lua_str "127.0.0.1:$WEB_PORT")"
+	printf 'setWebserverConfig({apiKey=%s, acl="127.0.0.1/32"})\n' "$(lua_str "$(api_key)")"
 	printf 'addLocal(%s)\n' "$(lua_str "127.0.0.1:$DNS_PORT")"
 	printf 'addLocal(%s)\n' "$(lua_str "$(lan_ip):$DNS_PORT")"
 	if cert_present; then
@@ -372,6 +397,7 @@ apply_dnsdist() {
 	cmp -s "$new" "$DNSDIST_CONF" || changed=1
 	[ "$sum" = "$(cat "$STATE_DIR/cert.sum" 2>/dev/null)" ] || changed=1
 	if [ "$changed" = 1 ]; then
+		chmod 600 "$new"
 		mv "$new" "$DNSDIST_CONF"
 		echo "$sum" > "$STATE_DIR/cert.sum"
 		retire_adguardhome
@@ -618,6 +644,10 @@ progress_json() {
 	printf '}'
 }
 
+number_or_null() {
+	if [ -n "$1" ]; then printf '%s' "$1"; else printf null; fi
+}
+
 json_or_null() {
 	if [ -n "$1" ]; then printf '"%s"' "$(json_escape "$1")"; else printf null; fi
 }
@@ -625,15 +655,17 @@ json_or_null() {
 bool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
 
 devices_json() {
+	counts=$1
 	first=1
 	printf '['
 	for sec in $(device_sections); do
 		id=$(uci_q get "familydns.$sec.client_id")
 		[ "$first" = 1 ] || printf ','
 		first=0
-		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s"}' \
+		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","queries":%s}' \
 			"$(json_escape "$(uci_q get "familydns.$sec.name")")" "$(json_escape "$id")" \
-			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")"
+			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")" \
+			"$(number_or_null "$(sum_counts "dev:$id" "$counts")")"
 	done
 	printf ']'
 }
@@ -675,8 +707,10 @@ cmd_status() {
 	progress_json
 	printf ',"lan":'
 	lan_json
+	counts=$(rule_counts 2>/dev/null)
+	printf ',"queries":{"default":%s}' "$(number_or_null "$(sum_counts default "$counts")")"
 	printf ',"devices":'
-	devices_json
+	devices_json "$counts"
 	printf '}\n'
 }
 

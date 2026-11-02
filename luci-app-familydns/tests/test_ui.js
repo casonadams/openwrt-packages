@@ -127,6 +127,22 @@ check('device not in status yet', fmt.describeDevice(undefined), { active: false
 check('applied device shows its DoT host', fmt.describeDevice({ name: 'Kid 1 iPhone', client_id: 'kid1', profile: 'adult', dot_host: 'kid1.example.duckdns.org' }),
 	{ active: true, text: 'kid1.example.duckdns.org' });
 
+console.log('-> query counts');
+check('integer query count is shown', fmt.formatQueries(1234), (1234).toLocaleString());
+check('zero query count is shown', fmt.formatQueries(0), '0');
+check('large query count is grouped', fmt.formatQueries(1234567), (1234567).toLocaleString());
+check('null query count is an en dash', fmt.formatQueries(null), '–');
+check('undefined query count is an en dash', fmt.formatQueries(undefined), '–');
+check('negative query count is an en dash', fmt.formatQueries(-1), '–');
+check('NaN query count is an en dash', fmt.formatQueries(NaN), '–');
+check('fractional query count is an en dash', fmt.formatQueries(1.5), '–');
+check('default path count is named', fmt.describeQueries({ default: 1234 }), 'Other devices on this network: ' + (1234).toLocaleString() + ' queries');
+check('default path zero is plural', fmt.describeQueries({ default: 0 }), 'Other devices on this network: 0 queries');
+check('default path one is singular', fmt.describeQueries({ default: 1 }), 'Other devices on this network: 1 query');
+check('default path unknown is an en dash', fmt.describeQueries({ default: null }), 'Other devices on this network: –');
+check('default path missing object is an en dash', fmt.describeQueries(undefined), 'Other devices on this network: –');
+check('query count note explains restarts', /restarts?/.test(fmt.queryCountDescription()), true);
+
 console.log('-> hostnames and profile commands');
 check('dot hostname', fmt.dotHostname('kid1', 'example.duckdns.org'), 'kid1.example.duckdns.org');
 check('no dot hostname without client id', fmt.dotHostname('', 'example.duckdns.org'), '');

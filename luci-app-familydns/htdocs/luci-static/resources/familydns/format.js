@@ -143,6 +143,27 @@ function describeDevice(device) {
 	return { active: true, text: device.dot_host };
 }
 
+function validCount(n) {
+	return typeof n === 'number' && Number.isInteger(n) && n >= 0;
+}
+
+function formatQueries(n) {
+	return validCount(n) ? n.toLocaleString() : '–';
+}
+
+function describeQueries(queries) {
+	const n = queries ? queries.default : undefined;
+	if (!validCount(n))
+		return _('Other devices on this network: %s').format('–');
+	if (n === 1)
+		return _('Other devices on this network: 1 query');
+	return _('Other devices on this network: %s queries').format(formatQueries(n));
+}
+
+function queryCountDescription() {
+	return _('Counts DNS queries since the resolver last started. Counters restart whenever the resolver restarts: on every configuration change, certificate renewal or restart.');
+}
+
 function validClientId(id) {
 	return CLIENT_ID_RE.test(String(id || ''));
 }
@@ -217,6 +238,9 @@ return baseclass.extend({
 	describeState: describeState,
 	describeCert: describeCert,
 	describeDevice: describeDevice,
+	formatQueries: formatQueries,
+	describeQueries: describeQueries,
+	queryCountDescription: queryCountDescription,
 	describeLan: describeLan,
 	retiredNote: retiredNote,
 	lanDnsDescription: lanDnsDescription,

@@ -59,6 +59,10 @@ assert_eq "firewall rule exists" true "$(field firewall_open)"
 assert_eq "network DNS is on" true "$(field lan.enabled)"
 assert_eq "network DNS is active" true "$(field lan.active)"
 assert_eq "device DoT host" kid1.test.duckdns.org "$(field 'devices[0].dot_host')"
+positive() { [ "${1:-0}" -gt 0 ] 2>/dev/null && echo yes || echo no; }
+assert_eq "kid1's queries are counted" yes "$(positive "$(field 'devices[0].queries')")"
+assert_eq "dad's queries are counted" yes "$(positive "$(field 'devices[1].queries')")"
+assert_eq "unmatched queries land in the default count" yes "$(positive "$(field 'queries.default')")"
 profile=$(in_container profile)
 assert_eq "locked profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
 assert_eq "locked profile is locked" yes "$(echo "$profile" | grep -q '<true/>' && echo yes)"

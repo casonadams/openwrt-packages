@@ -120,6 +120,7 @@ return view.extend({
 			const desc = fmt.describeState(state, port());
 			const lan = fmt.describeLan(state && state.lan);
 			const children = [ badge(desc.text, desc.kind), badge(lan.text, lan.kind) ];
+			children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;', 'title': fmt.queryCountDescription() }, fmt.describeQueries(state && state.queries)));
 			if (fmt.isRunning(state) && desc.stages.length) {
 				children.push(E('ul', { 'style': 'flex-basis:100%;margin:0;font-size:12px;' }, desc.stages.map(function(s) {
 					return E('li', {}, s.label + ': ' + s.state + (s.message ? ' – ' + s.message : ''));
@@ -145,8 +146,16 @@ return view.extend({
 			el.textContent = desc.text;
 		};
 
+		const paintQueries = function(el) {
+			const id = el.getAttribute('data-familydns-queries');
+			const devices = (state && state.devices) || [];
+			const dev = devices.find(function(d) { return d.client_id === id; });
+			el.textContent = fmt.formatQueries(dev ? dev.queries : undefined);
+		};
+
 		const paintDevices = function() {
 			document.querySelectorAll('[data-familydns-client]').forEach(function(el) { paintDevice(el); });
+			document.querySelectorAll('[data-familydns-queries]').forEach(function(el) { paintQueries(el); });
 		};
 
 		let setupBtn = null;
@@ -382,6 +391,16 @@ return view.extend({
 		o = s.option(form.DummyValue, '_dot', _('DoT hostname'));
 		o.renderWidget = function(section_id) {
 			return E('code', {}, fmt.dotHostname(uci.get('familydns', section_id, 'client_id'), domain()) || '–');
+		};
+
+		o = s.option(form.DummyValue, '_queries', _('Queries'));
+		o.renderWidget = function(section_id) {
+			const el = E('span', {
+				'data-familydns-queries': uci.get('familydns', section_id, 'client_id') || '',
+				'title': fmt.queryCountDescription()
+			});
+			paintQueries(el);
+			return el;
 		};
 
 		o = s.option(form.DummyValue, '_actions', _('Profile file'));

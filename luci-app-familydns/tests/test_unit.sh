@@ -146,14 +146,14 @@ assert_eq "adult plain upstream keeps its port" yes "$(has 'address="1.1.1.1:535
 assert_eq "fallback servers come after every profile upstream" yes "$(has 'address="9.9.9.9:53", pool="kids", order=101')"
 assert_eq "an unused profile gets no pool" 0 "$(count 'pool="bare"')"
 assert_eq "per-address rate limit defaults to 500" yes "$(has 'MaxQPSIPRule(500, 32, 128)')"
-assert_eq "DoT names are matched by SNI" yes "$(has 'addAction(SNIRule("kid1.example.duckdns.org"), PoolAction("kids"))')"
-assert_eq "a device's LAN address routes to its profile" yes "$(has 'addAction(NetmaskGroupRule("192.168.1.50"), PoolAction("kids"))')"
-assert_eq "outside the LAN an unknown name is refused" yes "$(has 'SNIRule("kid1.example.duckdns.org"), SNIRule("dad.example.duckdns.org")}))}), RCodeAction(DNSRCode.REFUSED))')"
-assert_eq "local names go to dnsmasq" yes "$(has 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"))')"
-assert_eq "everything else uses the network profile" yes "$(has 'addAction(AllRule(), PoolAction("kids"))')"
+assert_eq "DoT names are matched by SNI" yes "$(has 'addAction(SNIRule("kid1.example.duckdns.org"), PoolAction("kids"), {name="dev:kid1"})')"
+assert_eq "a device's LAN address routes to its profile" yes "$(has 'addAction(NetmaskGroupRule("192.168.1.50"), PoolAction("kids"), {name="dev:kid1"})')"
+assert_eq "outside the LAN an unknown name is refused" yes "$(has 'SNIRule("kid1.example.duckdns.org"), SNIRule("dad.example.duckdns.org")}))}), RCodeAction(DNSRCode.REFUSED), {name="refused"})')"
+assert_eq "local names go to dnsmasq" yes "$(has 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"), {name="local"})')"
+assert_eq "everything else uses the network profile" yes "$(has 'addAction(AllRule(), PoolAction("kids"), {name="default"})')"
 line_of() { printf '%s\n' "$conf" | grep -nF -- "$1" | head -n 1 | cut -d: -f1; }
 last=$(printf '%s\n' "$conf" | grep -v '^rc=' | tail -n 1)
-assert_eq "the default route is last" 'addAction(AllRule(), PoolAction("kids"))' "$last"
+assert_eq "the default route is last" 'addAction(AllRule(), PoolAction("kids"), {name="default"})' "$last"
 assert_eq "the refuse rule comes before any device route" yes "$([ "$(line_of REFUSED)" -lt "$(line_of 'SNIRule("kid1.example.duckdns.org"), PoolAction')" ] && echo yes || echo no)"
 
 { cat "$FIXTURE"; echo familydns.settings.ratelimit=0; } > "$FIXTURE.rl"
@@ -162,7 +162,7 @@ rm "$ACME_SSL"/*.key
 assert_eq "no key means no DoT listener" 0 "$(render_dnsdist | grep -c addTLSLocal)"
 echo key > "$ACME_SSL/*.example.duckdns.org.key"
 sed '/^familydns.@device/d' "$FIXTURE" > "$FIXTURE.nodev"
-assert_eq "without devices every outside source is refused" yes "$(with_fixture "$FIXTURE.nodev" render_dnsdist | grep -F 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED))' >/dev/null && echo yes)"
+assert_eq "without devices every outside source is refused" yes "$(with_fixture "$FIXTURE.nodev" render_dnsdist | grep -F 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED), {name="refused"})' >/dev/null && echo yes)"
 sed 's/^familydns.@device\[1\].profile=adult/familydns.@device[1].profile=ghost/' "$FIXTURE" > "$FIXTURE.ghost"
 with_fixture "$FIXTURE.ghost" render_dnsdist >/dev/null; assert_eq "a device with a missing profile is reported" "device 'dad' uses the missing profile 'ghost'" "$MSG"
 sed 's/^familydns.settings.lan_profile=.*/familydns.settings.lan_profile=ghost/' "$FIXTURE" > "$FIXTURE.langhost"
@@ -188,6 +188,36 @@ resolveip() { :; }
 assert_eq "the last good answer survives a DNS outage" 1.1.1.1 "$(resolve_upstream_ip one.one.one.one)"
 assert_eq "an IP literal is used as is" 192.0.2.9 "$(resolve_upstream_ip 192.0.2.9)"
 unset -f resolveip
+
+echo "-> query counters"
+assert_eq "the API is loopback only and keyed" yes "$(has "webserver(\"127.0.0.1:8083\")")"
+key=$(api_key)
+assert_eq "the API key is generated once and kept" "$key" "$(api_key)"
+assert_eq "the API key is in the config" yes "$(render_dnsdist | grep -F "apiKey=\"$key\"" >/dev/null && echo yes)"
+assert_eq "the API key file is not world readable" 600 "$(stat -c %a "$STATE_DIR/api.key" 2>/dev/null || stat -f %Lp "$STATE_DIR/api.key")"
+assert_eq "every rule is named so counts line up" 0 "$(printf '%s\n' "$conf" | grep '^addAction' | grep -vc 'name=')"
+# shellcheck disable=SC2329
+wget() {
+	printf '%s' '{"rules": [{"action": "drop", "action-stats": {"": 0}, "creationOrder": 0, "id": 0, "matches": 0, "name": "limited", "rule": "x", "uuid": "a"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 1, "id": 1, "matches": 7, "name": "dev:kid1", "rule": "SNI", "uuid": "b"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 2, "id": 2, "matches": 5, "name": "dev:kid1", "rule": "Src", "uuid": "c"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 3, "id": 3, "matches": 1200, "name": "default", "rule": "All", "uuid": "d"}]}'
+}
+counts=$(rule_counts)
+assert_eq "rule counts are read from the API body" "limited 0 dev:kid1 7 dev:kid1 5 default 1200" "$(echo "$counts" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "a device's SNI and LAN rules are added up" 12 "$(sum_counts dev:kid1 "$counts")"
+assert_eq "a rule that never matched is zero, not missing" 0 "$(sum_counts limited "$counts")"
+assert_eq "the default path is counted" 1200 "$(sum_counts default "$counts")"
+assert_eq "an unknown rule has no count" "" "$(sum_counts dev:ghost "$counts")"
+assert_eq "no counts at all means unknown" "" "$(sum_counts default "")"
+assert_eq "unknown counts become JSON null" null "$(number_or_null "")"
+assert_eq "zero stays a number" 0 "$(number_or_null 0)"
+devs=$(devices_json "$counts")
+assert_eq "devices JSON is valid" yes "$(json_ok "$devs")"
+assert_eq "a device carries its summed queries" 12 "$(json_get "$devs" 'at(0).queries')"
+assert_eq "a device without counters is null" null "$(json_get "$devs" 'at(1).queries')"
+assert_eq "devices JSON without any counts is valid" yes "$(json_ok "$(devices_json "")")"
+# shellcheck disable=SC2329
+wget() { return 1; }
+assert_eq "an unreachable API means no counts" "" "$(rule_counts)"
+unset -f wget
 
 echo "-> Apple profile"
 MC_NAME='Kid "One" <iPhone>' MC_CLIENT_ID=kid1 MC_DOMAIN=example.duckdns.org MC_IP=203.0.113.7 MC_LOCK=0 MC_FAILOVER=1 \

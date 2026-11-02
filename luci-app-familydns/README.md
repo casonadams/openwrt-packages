@@ -12,7 +12,7 @@ Install: see the [repository README](../README.md#install). `dnsmasq` stays the 
 2. **Services → Family DNS**: enter the domain (`<name>.duckdns.org`), token and email, tick *Enabled*, **Save & Apply**, then **Set up / Repair**. Certificate issuance takes about two minutes.
 3. Pick **Profiles** (each is a list of upstream servers, one per entry: `https://host/path` for DoH, `tls://host[:port]` for DoT, or a plain IPv4 address; at least one is required), then add **Devices** (a name, an id such as `kid1`, and a profile), **Save & Apply**, then **Install profile** and AirDrop the file to the device.
 
-dnsdist has no web UI. The generated configuration is `/etc/dnsdist.conf` (rewritten on every reconcile); logs are in `logread -e dnsdist`.
+The Devices table has a *Queries* column, and the header shows how many queries came from everything else on the network (the *default* path). The counts come from dnsdist's rule counters and restart from zero whenever dnsdist restarts (any config change or certificate renewal); there is no query log. dnsdist has no web UI of its own. The generated configuration is `/etc/dnsdist.conf` (rewritten on every reconcile); logs are in `logread -e dnsdist`.
 
 ## Notes
 
@@ -36,3 +36,4 @@ See [`AGENTS.md`](AGENTS.md) for the architecture.
 - DoH and DoT hostnames are resolved by the router when the config is rendered (hourly and on every change) and the last good address is kept, so a short DNS outage does not empty a profile. Plain upstreams must be IPv4 addresses.
 - dnsdist validates the upstream's certificate against `/etc/ssl/certs/ca-certificates.crt`.
 - Memory: dnsdist stays around 10-15 MB. There is no query log or statistics store.
+- A device's count includes its DoT queries (by hostname) and plain queries from its *LAN address*; a LAN device without an address set is counted under the default path.
