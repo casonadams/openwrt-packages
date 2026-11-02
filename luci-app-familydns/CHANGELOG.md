@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.1](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.0...luci-app-familydns-v1.0.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **luci-app-familydns:** ad blocking was switched off when LuCI dropped the default option ([aec3345](https://github.com/casonadams/openwrt-packages/commit/aec334577cd7eb971ef2bbd5c29993763b6c52fe))
+* **luci-app-familydns:** ad blocking was switched off when LuCI dropped the default option ([715ba7a](https://github.com/casonadams/openwrt-packages/commit/715ba7acae2256bc6cc0f72d22bbaf3923c64232))
+* **luci-app-familydns:** clean-install DuckDNS step ([369e7e7](https://github.com/casonadams/openwrt-packages/commit/369e7e722f7c8d80a9009d3dcbf62e422e4f029a))
+* **luci-app-familydns:** report DuckDNS connectivity failures correctly and flush the resolver cache ([32d78fb](https://github.com/casonadams/openwrt-packages/commit/32d78fbfce22a2704b15f4e266e51541161adce8))
+
 ## 1.0.0 (2026-10-31)
 
 
