@@ -22,7 +22,7 @@ load_engine() {
 
 fake_upstream() {
 	dnsmasq --conf-file=/dev/null --port="$1" --listen-address=127.0.0.1 --bind-interfaces --no-resolv --no-hosts \
-		--address="/who.test/$2" --address=/blocked.test/ --pid-file="/tmp/dnsmasq-$1.pid"
+		--address="/who.test/$2" --address=/blocked.test/ --address=/ok.blockedad.test/10.0.0.9 --address=/blockme.test/10.0.0.8 --address=/free.test/10.0.0.7 --pid-file="/tmp/dnsmasq-$1.pid"
 }
 
 case "$1" in
@@ -42,6 +42,10 @@ setup)
 	uci set familydns.broken=profile
 	uci set familydns.broken.name=Broken
 	uci add_list familydns.broken.upstream=127.0.0.1:9
+	uci set familydns.settings.blocklist=custom
+	uci set familydns.settings.blocklist_url="$LIST_URL"
+	uci add_list familydns.settings.allow=ok.blockedad.test
+	uci add_list familydns.settings.block=blockme.test
 	uci -q delete familydns.settings.fallback
 	uci add_list familydns.settings.fallback=127.0.0.1:5393
 	for d in "Kid One|kid1|kids" "Dad|dad|adult" "Kid Two|kid2|broken"; do
@@ -85,6 +89,12 @@ lan-off)
 	;;
 status) familydns status ;;
 profile) familydns profile kid1 ;;
+lists)
+	load_engine
+	fetch_blocklist && apply_dnsdist
+	echo "domains: $(wc -l < "$BLOCKLIST_FILE" | tr -d ' ')"
+	sleep 2
+	;;
 resync)
 	load_engine
 	uci delete "familydns.@device[2]"

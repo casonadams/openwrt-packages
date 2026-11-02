@@ -213,6 +213,7 @@ return view.extend({
 			document.querySelectorAll('[data-familydns-queries],[data-familydns-blocked]').forEach(paintCount);
 			document.querySelectorAll('[data-familydns-default]').forEach(paintDefaultState);
 			document.querySelectorAll('[data-familydns-setup]').forEach(paintConnection);
+			document.querySelectorAll('[data-familydns-list]').forEach(paintList);
 		};
 
 		let setupBtn = null;
@@ -225,6 +226,17 @@ return view.extend({
 				setupBtn.disabled = !fmt.canBootstrap(state, dirty);
 				setupBtn.title = dirty ? _('Save & Apply your changes first.') : '';
 			});
+		};
+
+		const paintList = function(el) {
+			const which = el.getAttribute('data-familydns-list');
+			const bl = state && state.blocklist;
+			if (which === 'updated') {
+				el.textContent = bl && bl.active ? fmt.formatUpdated(bl.updated) : '–';
+				return;
+			}
+			const desc = fmt.describeBlocklist(bl);
+			el.textContent = which === 'name' ? desc.name : desc.detail;
 		};
 
 		const paintConnection = function(el) {
@@ -367,6 +379,91 @@ return view.extend({
 			withHelp(o, providerHelp(_('Used only when every upstream of a profile is down, so devices still get DNS from these servers. %s').format(fmt.upstreamHint())));
 			o.validate = function(_section_id, value) {
 				return fmt.checkOptional(value, fmt.validUpstream, fmt.upstreamError());
+			};
+			modalOnlyOptions(s);
+		}
+
+		let updateBtn = null;
+
+		const updateList = function() {
+			updateBtn.disabled = true;
+			updateBtn.textContent = _('Updating...');
+			return callExec(ENGINE, [ 'lists', 'update' ]).then(function(res) {
+				if (res.code !== 0)
+					throw commandError(res);
+				return refresh();
+			}).catch(notifyError).finally(function() {
+				updateBtn.disabled = false;
+				updateBtn.textContent = _('Update now');
+			});
+		};
+
+		function buildAds() {
+			s = m.section(form.GridSection, 'settings', _('Ad blocking'),
+				_('One list for every device. Names on it get no answer, on top of whatever the profile\'s filter blocks. It is downloaded again every night.'));
+			s.anonymous = true;
+			s.addremove = false;
+			s.modaltitle = _('Ad blocking');
+
+			s.renderRowActions = function(section_id) {
+				const td = form.GridSection.prototype.renderRowActions.call(this, section_id);
+				const box = td.querySelector('div') || td;
+				box.className = 'familydns-actions';
+				updateBtn = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-action' }, _('Update now'));
+				updateBtn.addEventListener('click', ui.createHandlerFn(self, updateList));
+				box.insertBefore(updateBtn, box.firstChild);
+				return td;
+			};
+
+			o = s.option(form.DummyValue, '_list', _('List'));
+			o.modalonly = false;
+			o.textvalue = function() {
+				const name = E('strong', { 'data-familydns-list': 'name' });
+				const detail = E('div', { 'style': MUTED, 'data-familydns-list': 'detail' });
+				paintList(name);
+				paintList(detail);
+				return E('div', {}, [ name, detail ]);
+			};
+
+			o = s.option(form.DummyValue, '_updated', _('Updated'));
+			o.modalonly = false;
+			o.textvalue = function() {
+				const el = E('span', { 'data-familydns-list': 'updated' });
+				paintList(el);
+				return el;
+			};
+
+			o = s.option(form.ListValue, 'blocklist', _('List'));
+			o.default = 'hagezi';
+			fmt.blocklistPresets().forEach(function(p) { o.value(p.id, p.label); });
+			withHelp(o, [
+				_('Bigger lists block more and use more memory (the largest takes about 35 MB). If a site breaks, add it to Never block. '),
+				E('a', { 'href': fmt.BLOCKLIST_HELP_URL, 'target': '_blank', 'rel': 'noopener noreferrer' }, _('About these lists'))
+			]);
+
+			o = s.option(form.Value, 'blocklist_url', _('List address'));
+			o.depends('blocklist', 'custom');
+			o.placeholder = 'https://example.com/hosts.txt';
+			o.rmempty = true;
+			o.description = _('A hosts file, a plain list of domains, or simple adblock rules.');
+			o.validate = function(_section_id, value) {
+				return fmt.checkOptional(value, fmt.validListUrl, _('Expecting an http:// or https:// address'));
+			};
+
+			o = s.option(form.DynamicList, 'block', _('Always block'));
+			o.rmempty = true;
+			o.placeholder = 'ads.example.com';
+			o.description = _('Blocked even if the list does not have them, including their subdomains. Works with the list switched off.');
+			o.validate = function(_section_id, value) {
+				return fmt.checkOptional(value, fmt.validAllowedDomain, _('Expecting a domain name such as example.com'));
+			};
+
+			o = s.option(form.DynamicList, 'allow', _('Never block'));
+			o.rmempty = true;
+			o.placeholder = 'example.com';
+			o.description = _('Never blocked, including their subdomains. This wins over the list and over Always block.');
+			o.validate = function(_section_id, value) {
+				return fmt.checkOptional(value, fmt.validAllowedDomain, _('Expecting a domain name such as example.com'));
 			};
 			modalOnlyOptions(s);
 		}
@@ -591,8 +688,8 @@ return view.extend({
 		// sections lead and setup moves to the end.
 		const setupFirst = !(state && state.configured);
 		const builders = setupFirst
-			? [ buildSetup, buildDevices, buildProfiles ]
-			: [ buildDevices, buildProfiles, buildSetup ];
+			? [ buildSetup, buildDevices, buildProfiles, buildAds ]
+			: [ buildDevices, buildProfiles, buildAds, buildSetup ];
 		builders.forEach(function(build) { build(); });
 
 		return m.render();

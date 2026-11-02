@@ -13,19 +13,27 @@ PORT=18853
 TMP=$(mktemp -d)
 cleanup() {
 	docker rm -f "$NAME" >/dev/null 2>&1
+	[ -z "$HTTP_PID" ] || kill "$HTTP_PID" 2>/dev/null
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 in_container() {
-	docker exec "$NAME" sh /pkg/tests/container-run.sh "$1"
+	docker exec -e LIST_URL="http://host.docker.internal:$LIST_PORT/list.txt" "$NAME" sh /pkg/tests/container-run.sh "$1"
 }
 
 dot() {
 	python3 "$SCRIPT_DIR/dot_query.py" "$PORT" "$1.test.duckdns.org" "$2" "$TMP/ca.crt"
 }
 
-docker run -d --name "$NAME" --platform linux/amd64 -p "127.0.0.1:$PORT:853" -v "$PKG:/pkg:ro" "$IMAGE" sleep 900 >/dev/null || exit 1
+# The container downloads the ad-blocking list from the host, like the router downloads it from GitHub.
+LIST_PORT=18099
+mkdir -p "$TMP/www"
+printf '%s\n' '# test list' blockedad.test tracker.test > "$TMP/www/list.txt"
+python3 -m http.server "$LIST_PORT" --bind 0.0.0.0 --directory "$TMP/www" >/dev/null 2>&1 &
+HTTP_PID=$!
+
+docker run -d --name "$NAME" --platform linux/amd64 --add-host=host.docker.internal:host-gateway -p "127.0.0.1:$PORT:853" -v "$PKG:/pkg:ro" "$IMAGE" sleep 900 >/dev/null || exit 1
 
 echo "-> Bootstrap stages against a real dnsdist"
 out=$(in_container setup 2>&1)
@@ -43,6 +51,15 @@ assert_eq "local names are answered by dnsmasq" 192.168.1.1 "$(dot kid1 router.l
 dot kid1 blocked.test >/dev/null
 dot kid1 blocked.test >/dev/null
 dot stranger blocked.test >/dev/null
+echo "-> Ad blocking list"
+assert_eq "a listed domain is blocked" "" "$(dot kid1 blockedad.test)"
+assert_eq "its subdomains are blocked" "" "$(dot kid1 www.blockedad.test)"
+assert_eq "an allowed subdomain of a listed domain still resolves" 10.0.0.9 "$(dot kid1 ok.blockedad.test)"
+assert_eq "an unlisted domain still resolves" 10.0.0.1 "$(dot kid1 who.test)"
+assert_eq "everyone else is filtered too" "" "$(dot stranger tracker.test)"
+assert_eq "a domain the admin blocks is blocked although the upstream resolves it" "" "$(dot kid1 blockme.test)"
+assert_eq "its subdomains are blocked" "" "$(dot kid1 a.blockme.test)"
+assert_eq "an unrelated domain the upstream resolves is untouched" 10.0.0.7 "$(dot kid1 free.test)"
 
 echo "-> Network-wide DNS through dnsdist"
 lan=$(in_container lan)
@@ -66,12 +83,20 @@ positive() { [ "${1:-0}" -gt 0 ] 2>/dev/null && echo yes || echo no; }
 assert_eq "kid1's queries are counted" yes "$(positive "$(field 'devices[0].queries')")"
 assert_eq "dad's queries are counted" yes "$(positive "$(field 'devices[1].queries')")"
 assert_eq "unmatched queries land in the default count" yes "$(positive "$(field 'queries.default')")"
-assert_eq "kid1's NXDOMAIN answers are counted (the second one comes from the cache)" 2 "$(field 'devices[0].blocked')"
+assert_eq "kid1's blocked answers are counted: two from the filter (one cached) and four from the lists" 6 "$(field 'devices[0].blocked')"
+assert_eq "the list is active with its domains" "true 2" "$(field 'blocklist.active') $(field 'blocklist.domains')"
 assert_eq "the default sender's NXDOMAIN answers are counted" yes "$(positive "$(field 'queries.default_blocked')")"
 assert_eq "a device with no NXDOMAIN answers shows zero" 0 "$(field 'devices[1].blocked')"
 profile=$(in_container profile)
 assert_eq "profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
 assert_eq "profile uses the DoT protocol" yes "$(echo "$profile" | grep -q '<string>TLS</string>' && echo yes)"
+
+echo "-> Updating the list"
+printf '%s\n' '# test list' blockedad.test tracker.test newlyadded.test > "$TMP/www/list.txt"
+lists=$(in_container lists)
+assert_eq "an updated list is applied" "domains: 3" "$(echo "$lists" | grep '^domains')"
+assert_eq "a newly listed domain is blocked after the update" "" "$(dot kid1 newlyadded.test)"
+assert_eq "other names still resolve after the restart" 10.0.0.1 "$(dot kid1 who.test)"
 
 echo "-> Turning network DNS off, removing a device, tearing down"
 off=$(in_container lan-off)

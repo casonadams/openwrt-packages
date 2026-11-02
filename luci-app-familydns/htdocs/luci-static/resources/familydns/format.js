@@ -147,7 +147,58 @@ function formatQueries(n) {
 }
 
 function blockedCountDescription() {
-	return _('Answers saying the name does not exist. Most are the filter blocking a site; a mistyped name counts too. Counters restart whenever the resolver restarts.');
+	return _('Answers saying the name does not exist: sites blocked by the ad-blocking list or the profile\'s filter, plus the odd mistyped name. Counters restart whenever the resolver restarts.');
+}
+
+const BLOCKLIST_HELP_URL = 'https://github.com/hagezi/dns-blocklists#lists';
+
+// Preset ids match the engine's blocklist_url(); sizes are the list lengths when this was written.
+function blocklistPresets() {
+	return [
+		{ id: 'hagezi', label: _('HaGeZi Normal, recommended (176k domains)'), name: _('HaGeZi Multi Normal') },
+		{ id: 'hagezi-light', label: _('HaGeZi Light, fewest wrong blocks (79k)'), name: _('HaGeZi Light') },
+		{ id: 'hagezi-pro', label: _('HaGeZi Pro, stricter (212k)'), name: _('HaGeZi Pro') },
+		{ id: 'stevenblack', label: _('StevenBlack unified hosts (78k)'), name: _('StevenBlack') },
+		{ id: 'custom', label: _('My own list (URL)'), name: _('Custom list') },
+		{ id: 'off', label: _('Off'), name: _('Off') }
+	];
+}
+
+function blocklistName(preset) {
+	const found = blocklistPresets().find(function(p) { return p.id === (preset || 'hagezi'); });
+	return found ? found.name : String(preset);
+}
+
+// blocklist is status.blocklist: { preset, active, domains, updated (epoch seconds) }
+function describeBlocklist(blocklist) {
+	if (!blocklist)
+		return { name: '–', detail: '' };
+	const name = blocklistName(blocklist.preset);
+	if (blocklist.preset === 'off')
+		return { name: name, detail: _('Ad blocking is off') };
+	if (!blocklist.active)
+		return { name: name, detail: _('Not downloaded yet') };
+	return { name: name, detail: _('%s domains').format(formatQueries(blocklist.domains)) };
+}
+
+function formatUpdated(epoch, now) {
+	if (!validCount(epoch))
+		return '–';
+	const days = Math.floor(((now == null ? Date.now() / 1000 : now) - epoch) / 86400);
+	if (days <= 0)
+		return _('Today');
+	if (days === 1)
+		return _('Yesterday');
+	return _('%d days ago').format(days);
+}
+
+// An allowed-domain entry: a plain domain name, optionally with a leading "*."; blank is allowed.
+function validAllowedDomain(value) {
+	return /^(?:\*\.)?[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)+$/i.test(String(value || '').trim());
+}
+
+function validListUrl(value) {
+	return /^https?:\/\/[^\s/]+\/\S*$/i.test(String(value || '').trim());
 }
 
 function queryCountDescription() {
@@ -300,6 +351,12 @@ return baseclass.extend({
 	formatQueries: formatQueries,
 	queryCountDescription: queryCountDescription,
 	blockedCountDescription: blockedCountDescription,
+	BLOCKLIST_HELP_URL: BLOCKLIST_HELP_URL,
+	blocklistPresets: blocklistPresets,
+	describeBlocklist: describeBlocklist,
+	formatUpdated: formatUpdated,
+	validAllowedDomain: validAllowedDomain,
+	validListUrl: validListUrl,
 	describeLan: describeLan,
 	lanDnsDescription: lanDnsDescription,
 	orderStages: orderStages,
