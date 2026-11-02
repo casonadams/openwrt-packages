@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v2.0.0...luci-app-familydns-v2.1.0) (2026-11-02)
+
+
+### Features
+
+* **familydns:** redesign the page around devices, profiles and connection ([a8266a1](https://github.com/casonadams/openwrt-packages/commit/a8266a165da7de67dda6b8f9430a7657a0a88048))
+* **familydns:** shared ad-blocking list with custom allow and block domains ([a3b90bb](https://github.com/casonadams/openwrt-packages/commit/a3b90bb0ada93c8f31af05befe1f2db93928e709))
+
 ## [2.0.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.2...luci-app-familydns-v2.0.0) (2026-11-02)
 
 
