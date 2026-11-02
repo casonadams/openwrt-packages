@@ -13,6 +13,11 @@ const HOST_RE_SRC = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-
 const DOH_RE = new RegExp('^https://' + HOST_RE_SRC + '(?::(\\d{1,5}))?/\\S+$', 'i');
 const DOT_RE = new RegExp('^tls://' + HOST_RE_SRC + '(?::(\\d{1,5}))?$', 'i');
 const IPV4_RE = new RegExp('^' + OCTET + '(?:\\.' + OCTET + '){3}(?::(\\d{1,5}))?$');
+const PROVIDER_LIST_URL = 'https://adguard-dns.io/kb/general/dns-providers/';
+// Section names the UCI config already uses; a profile may not take them.
+const RESERVED_PROFILE_IDS = [ 'settings' ];
+// Path segments that name a generic DoH endpoint rather than a provider's filter.
+const GENERIC_DOH_PATHS = [ 'dns-query', 'doh', 'dns', 'resolve', 'query' ];
 
 function hasOwn(obj, key) {
 	return Object.prototype.hasOwnProperty.call(obj, key);
@@ -45,29 +50,14 @@ function stageView(stage) {
 
 function describeLan(lan) {
 	if (!lan || !lan.enabled)
-		return { kind: 'off', text: _('Network DNS: off') };
+		return { kind: 'off', text: _('Off') };
 	if (lan.active)
-		return { kind: 'ready', text: _('Network DNS: via Family DNS') };
-	return { kind: 'warning', text: _('Network DNS: waiting for the resolver - using router DNS') };
-}
-
-function joinNames(names) {
-	if (names.length <= 1)
-		return names.join('');
-	return names.slice(0, -1).join(', ') + ' ' + _('and') + ' ' + names[names.length - 1];
-}
-
-function retiredNote(lan) {
-	if (!lan || !lan.enabled || !lan.retired || lan.retired.length === 0)
-		return '';
-	const names = joinNames(lan.retired);
-	return lan.retired.length === 1
-		? _('%s is paused while this is on').format(names)
-		: _('%s are paused while this is on').format(names);
+		return { kind: 'ready', text: _('Active') };
+	return { kind: 'warning', text: _('Waiting for the resolver - using router DNS') };
 }
 
 function lanDnsDescription() {
-	return _('All LAN DNS, including devices with hardcoded DNS servers, is redirected to Family DNS. adblock and https-dns-proxy are paused while this is on.');
+	return _('Every device on this network, including ones with hardcoded DNS servers, is sent through Family DNS.');
 }
 
 function problemFor(status, port) {
@@ -137,10 +127,15 @@ function describeCert(cert) {
 	return cert.staging ? text + ' ' + _('(staging)') : text;
 }
 
-function describeDevice(device) {
-	if (!device)
-		return { active: false, text: _('Not applied yet') };
-	return { active: true, text: device.dot_host };
+// The public address as DuckDNS knows it versus the WAN address the router actually has.
+function describeAddress(status) {
+	if (!status || !status.wan_ip)
+		return { text: '–', ok: false, warn: false };
+	if (status.ddns_ok)
+		return { text: _('Up to date (%s)').format(status.wan_ip), ok: true, warn: false };
+	if (status.ddns_ip)
+		return { text: _('Out of date: router %s, DuckDNS %s').format(status.wan_ip, status.ddns_ip), ok: false, warn: true };
+	return { text: _('Not published yet (%s)').format(status.wan_ip), ok: false, warn: true };
 }
 
 function validCount(n) {
@@ -151,13 +146,8 @@ function formatQueries(n) {
 	return validCount(n) ? n.toLocaleString() : '–';
 }
 
-function describeQueries(queries) {
-	const n = queries ? queries.default : undefined;
-	if (!validCount(n))
-		return _('Other devices on this network: %s').format('–');
-	if (n === 1)
-		return _('Other devices on this network: 1 query');
-	return _('Other devices on this network: %s queries').format(formatQueries(n));
+function blockedCountDescription() {
+	return _('Answers saying the name does not exist. Most are the filter blocking a site; a mistyped name counts too. Counters restart whenever the resolver restarts.');
 }
 
 function queryCountDescription() {
@@ -174,6 +164,43 @@ function slugify(name) {
 		.replace(/^-+|-+$/g, '')
 		.slice(0, 63)
 		.replace(/-+$/, '');
+}
+
+// A profile's UCI section name is derived from its display name. UCI names allow only
+// letters, digits and underscores, so dashes become underscores; the result is made unique.
+function profileId(name, taken) {
+	const base = slugify(name).replace(/-/g, '_');
+	if (!base)
+		return '';
+	const used = RESERVED_PROFILE_IDS.concat(taken || []);
+	let id = base;
+	for (let n = 2; used.indexOf(id) >= 0; n++)
+		id = base + '_' + n;
+	return id;
+}
+
+function randomHex(n) {
+	const bytes = new Uint8Array(Math.ceil(n / 2));
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, function(b) { return ('0' + b.toString(16)).slice(-2); }).join('').slice(0, n);
+}
+
+// A device's DNS hostname label: a slug of its name plus a short random suffix, so the public
+// address cannot be guessed from the name. `random(n)` returns n hex characters (injectable for tests).
+function deviceId(name, taken, random) {
+	const base = slugify(name).slice(0, 50).replace(/-+$/, '');
+	if (!base)
+		return '';
+	const used = taken || [];
+	let id;
+	do {
+		id = base + '-' + (random || randomHex)(4);
+	} while (used.indexOf(id) >= 0);
+	return id;
+}
+
+function countDevicesUsing(deviceProfiles, id) {
+	return (deviceProfiles || []).filter(function(p) { return p === id; }).length;
 }
 
 // LuCI validates blank optional fields, blank list entries and freshly added table rows, so a
@@ -205,8 +232,39 @@ function validUpstream(value) {
 	return !!m && (m[1] === undefined || validPort(m[1]));
 }
 
-function isDuplicate(id, others) {
-	return (others || []).indexOf(id) >= 0;
+function upstreamHint() {
+	return _('Use https://host/path (DoH), tls://host (DoT) or a plain IPv4 address, optionally with :port. quic:// and sdns:// entries are not supported.');
+}
+
+function upstreamError() {
+	return _('Expecting https://host/path, tls://host or an IPv4 address, optionally with :port. quic:// and sdns:// entries are not supported.');
+}
+
+// Short label for an upstream: the provider host, plus the filter name from a DoH path when
+// there is one (https://doh.cleanbrowsing.org/doh/family-filter/ -> "doh.cleanbrowsing.org (family-filter)").
+function upstreamName(value) {
+	const text = String(value || '');
+	const doh = /^https:\/\/([^\/:]+)(?::\d+)?\/(.*)$/i.exec(text);
+	if (doh) {
+		const label = doh[2].split('/').filter(function(part) {
+			return part !== '' && GENERIC_DOH_PATHS.indexOf(part.toLowerCase()) < 0;
+		}).pop();
+		return label ? doh[1] + ' (' + label + ')' : doh[1];
+	}
+	const dot = /^tls:\/\/([^:\/]+)/i.exec(text);
+	if (dot)
+		return dot[1];
+	const ip = /^(\d{1,3}(?:\.\d{1,3}){3})/.exec(text);
+	return ip ? ip[1] : text;
+}
+
+function upstreamSummary(list) {
+	const items = (Array.isArray(list) ? list : [ list ]).filter(function(v) {
+		return String(v || '').trim() !== '';
+	}).map(upstreamName);
+	if (items.length === 0)
+		return _('None set');
+	return items.length === 1 ? items[0] : items[0] + ' ' + _('+%d more').format(items.length - 1);
 }
 
 function dotHostname(clientId, domain) {
@@ -234,27 +292,33 @@ function shouldFetch(running, elapsedMs) {
 }
 
 return baseclass.extend({
+	PROVIDER_LIST_URL: PROVIDER_LIST_URL,
 	STAGE_ORDER: STAGE_ORDER.slice(),
 	describeState: describeState,
 	describeCert: describeCert,
-	describeDevice: describeDevice,
+	describeAddress: describeAddress,
 	formatQueries: formatQueries,
-	describeQueries: describeQueries,
 	queryCountDescription: queryCountDescription,
+	blockedCountDescription: blockedCountDescription,
 	describeLan: describeLan,
-	retiredNote: retiredNote,
 	lanDnsDescription: lanDnsDescription,
 	orderStages: orderStages,
 	isRunning: isRunning,
 	validClientId: validClientId,
 	slugify: slugify,
+	profileId: profileId,
+	deviceId: deviceId,
+	countDevicesUsing: countDevicesUsing,
 	checkOptional: checkOptional,
 	validDomain: validDomain,
 	validEmail: validEmail,
 	validPort: validPort,
 	validLanIp: validLanIp,
 	validUpstream: validUpstream,
-	isDuplicate: isDuplicate,
+	upstreamHint: upstreamHint,
+	upstreamError: upstreamError,
+	upstreamName: upstreamName,
+	upstreamSummary: upstreamSummary,
 	dotHostname: dotHostname,
 	mobileconfigFilename: mobileconfigFilename,
 	profileArgs: profileArgs,

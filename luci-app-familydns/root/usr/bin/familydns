@@ -207,9 +207,37 @@ lan_domain() {
 	echo "${d:-lan}"
 }
 
+# "Everyone else on this network" is a device section like any other, except that it has no hostname
+# and cannot be removed: it names the profile for queries that match no device and whether the LAN's
+# port 53 is redirected to the resolver.
+DEFAULT_SEC=everyone
+
+default_opt() {
+	uci_q get "familydns.$DEFAULT_SEC.$1"
+}
+
 lan_profile() {
-	p=$(setting lan_profile)
+	p=$(default_opt profile)
 	echo "${p:-adult}"
+}
+
+default_enabled() {
+	[ "$(default_opt enabled)" = 1 ]
+}
+
+# migrate_default: older versions kept these two as settings; move them into the default section
+migrate_default() {
+	[ "$(uci_q get "familydns.$DEFAULT_SEC")" = device ] && return 0
+	profile=$(setting lan_profile)
+	enabled=$(setting lan_dns)
+	uci_q set "familydns.$DEFAULT_SEC=device"
+	uci_q set "familydns.$DEFAULT_SEC.name=Everyone else"
+	uci_q set "familydns.$DEFAULT_SEC.profile=${profile:-adult}"
+	[ "$enabled" != 1 ] || uci_q set "familydns.$DEFAULT_SEC.enabled=1"
+	uci_q delete familydns.settings.lan_profile
+	uci_q delete familydns.settings.lan_dns
+	uci_q reorder "familydns.$DEFAULT_SEC=0"
+	uci_q commit familydns
 }
 
 dns_listening() {
@@ -319,6 +347,15 @@ sum_counts() {
 	printf '%s\n' "$2" | awk -v n="$1" '$1 == n {t += $2; seen = 1} END {if (seen) print t}'
 }
 
+# emit_nx <tag value>: count NXDOMAIN answers for that sender (the filter's "blocked" answer, plus
+# genuinely missing names), from the upstream and from the packet cache
+emit_nx() {
+	rule="AndRule({TagRule(\"who\", $(lua_str "$1")), RCodeRule(DNSRCode.NXDOMAIN)})"
+	name=$(lua_str "nx:$1")
+	printf 'addResponseAction(%s, AllowResponseAction(), {name=%s})\n' "$rule" "$name"
+	printf 'addCacheHitResponseAction(%s, AllowResponseAction(), {name=%s})\n' "$rule" "$name"
+}
+
 emit_routes() {
 	limit=$(setting ratelimit)
 	limit=${limit:-500}
@@ -334,14 +371,24 @@ emit_routes() {
 		echo 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED), {name="refused"})'
 	fi
 	emit_local
+	# Tag each query with who sent it (device, else default) and route by tag, so the response rules
+	# can count NXDOMAIN answers per sender, from the pool and from the packet cache alike.
 	for sec in $(device_sections); do
 		id=$(uci_q get "familydns.$sec.client_id")
-		pool=$(lua_str "$(uci_q get "familydns.$sec.profile")")
-		printf 'addAction(SNIRule(%s), PoolAction(%s), {name=%s})\n' "$(lua_str "$id.$dom")" "$pool" "$(lua_str "dev:$id")"
+		tag=$(lua_str "dev:$id")
+		printf 'addAction(AndRule({SNIRule(%s), NotRule(TagRule("who"))}), SetTagAction("who", %s), {name=%s})\n' "$(lua_str "$id.$dom")" "$tag" "$tag"
 		lan=$(uci_q get "familydns.$sec.lan_ip")
-		[ -z "$lan" ] || printf 'addAction(NetmaskGroupRule(%s), PoolAction(%s), {name=%s})\n' "$(lua_str "$lan")" "$pool" "$(lua_str "dev:$id")"
+		[ -z "$lan" ] || printf 'addAction(AndRule({NetmaskGroupRule(%s), NotRule(TagRule("who"))}), SetTagAction("who", %s), {name=%s})\n' "$(lua_str "$lan")" "$tag" "$tag"
 	done
-	printf 'addAction(AllRule(), PoolAction(%s), {name="default"})\n' "$(lua_str "$(lan_profile)")"
+	echo 'addAction(NotRule(TagRule("who")), SetTagAction("who", "default"), {name="default"})'
+	for sec in $(device_sections); do
+		printf 'addAction(TagRule("who", %s), PoolAction(%s))\n' "$(lua_str "dev:$(uci_q get "familydns.$sec.client_id")")" "$(lua_str "$(uci_q get "familydns.$sec.profile")")"
+	done
+	printf 'addAction(TagRule("who", "default"), PoolAction(%s))\n' "$(lua_str "$(lan_profile)")"
+	for sec in $(device_sections); do
+		emit_nx "dev:$(uci_q get "familydns.$sec.client_id")"
+	done
+	emit_nx default
 }
 
 # render_dnsdist: the whole dnsdist configuration on stdout. Plain DNS (from the LAN redirect) and public DoT share
@@ -386,6 +433,19 @@ enable_dnsdist_service() {
 	/etc/init.d/dnsdist enable >/dev/null 2>&1
 }
 
+# The old process keeps answering until the restart replaces it, so "listening" alone proves nothing
+# right after a restart; wait for a new process to be the one listening.
+dnsdist_settled() {
+	[ "$(pidof dnsdist)" != "$OLD_PID" ] && dns_listening
+}
+
+restart_dnsdist() {
+	OLD_PID=$(pidof dnsdist)
+	retire_adguardhome
+	dnsdist_restart
+	wait_for dnsdist_settled 20 || { MSG="dnsdist did not start; see: logread -e dnsdist"; return 1; }
+}
+
 # apply_dnsdist: render, validate, and restart dnsdist only when the config or the certificate changed
 apply_dnsdist() {
 	mkdir -p "$STATE_DIR"
@@ -400,13 +460,11 @@ apply_dnsdist() {
 		chmod 600 "$new"
 		mv "$new" "$DNSDIST_CONF"
 		echo "$sum" > "$STATE_DIR/cert.sum"
-		retire_adguardhome
-		dnsdist_restart
+		restart_dnsdist
 	else
 		rm -f "$new"
-		dns_listening || { retire_adguardhome; dnsdist_restart; }
+		dns_listening || restart_dnsdist
 	fi
-	wait_for dns_listening 15 || { MSG="dnsdist did not start; see: logread -e dnsdist"; return 1; }
 }
 
 stage_dnsdist() {
@@ -434,32 +492,6 @@ stage_firewall() {
 
 # --- stage: lan (use the resolver for the whole network) --------------------
 
-retired_file() { echo "$STATE_DIR/retired"; }
-
-retire_legacy() {
-	mkdir -p "$STATE_DIR"
-	touch "$(retired_file)"
-	for svc in adblock https-dns-proxy; do
-		[ -x "/etc/init.d/$svc" ] || continue
-		was_enabled=0
-		"/etc/init.d/$svc" enabled && was_enabled=1
-		[ "$was_enabled" = 1 ] || pidof "$svc" >/dev/null 2>&1 || continue
-		grep -q "^$svc " "$(retired_file)" || echo "$svc $was_enabled" >> "$(retired_file)"
-		"/etc/init.d/$svc" stop >/dev/null 2>&1
-		[ "$was_enabled" = 1 ] && "/etc/init.d/$svc" disable >/dev/null 2>&1
-	done
-	return 0
-}
-
-restore_legacy() {
-	[ -s "$(retired_file)" ] || return 0
-	while read -r svc was_enabled; do
-		[ "$was_enabled" = 1 ] && "/etc/init.d/$svc" enable >/dev/null 2>&1
-		"/etc/init.d/$svc" start >/dev/null 2>&1
-	done < "$(retired_file)"
-	: > "$(retired_file)"
-}
-
 lan_redirect_present() {
 	[ "$(uci_q get firewall.familydns_lan_dns)" = redirect ]
 }
@@ -485,18 +517,12 @@ lan_redirect_off() {
 	/etc/init.d/firewall reload >/dev/null 2>&1
 }
 
-lan_off() {
-	lan_redirect_off
-	restore_legacy
-}
-
 stage_lan() {
-	if [ "$(setting lan_dns)" != 1 ]; then
-		lan_off
+	if ! default_enabled; then
+		lan_redirect_off
 		MSG="off"
 		return 0
 	fi
-	retire_legacy
 	if dns_listening; then
 		lan_redirect_on
 		MSG="network DNS goes through the resolver"
@@ -509,7 +535,7 @@ stage_lan() {
 
 # Fail open: keep the redirect only while the resolver is actually listening.
 cmd_watch() {
-	[ -e "$STATE_DIR/configured" ] && [ "$(setting lan_dns)" = 1 ] || return 0
+	[ -e "$STATE_DIR/configured" ] && default_enabled || return 0
 	if dns_listening; then
 		lan_redirect_present || lan_redirect_on
 	else
@@ -531,6 +557,7 @@ run_stage() {
 }
 
 bootstrap_run() {
+	migrate_default
 	progress_init
 	echo $$ > "$PID_FILE"
 	validate_settings || { progress_set ddns error "$MSG"; return 1; }
@@ -555,7 +582,12 @@ cmd_sync() {
 	apply_dnsdist && echo "applied"
 }
 
+cmd_migrate() {
+	migrate_default
+}
+
 cmd_reconcile() {
+	migrate_default
 	[ -e "$STATE_DIR/configured" ] || return 0
 	mkdir "$LOCK_DIR" 2>/dev/null || return 0
 	trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
@@ -595,7 +627,7 @@ dnsdist_off() {
 
 cmd_teardown() {
 	/etc/init.d/familydns stop >/dev/null 2>&1
-	lan_off
+	lan_redirect_off
 	uci_q delete firewall.familydns_dot && uci_q commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1
 	uci_q delete ddns.familydns && uci_q commit ddns && /etc/init.d/ddns restart >/dev/null 2>&1
 	uci_q delete acme.familydns && uci_q commit acme
@@ -660,22 +692,21 @@ devices_json() {
 		id=$(uci_q get "familydns.$sec.client_id")
 		[ "$first" = 1 ] || printf ','
 		first=0
-		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","queries":%s}' \
+		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","queries":%s,"blocked":%s}' \
 			"$(json_escape "$(uci_q get "familydns.$sec.name")")" "$(json_escape "$id")" \
 			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")" \
-			"$(number_or_null "$(sum_counts "dev:$id" "$counts")")"
+			"$(number_or_null "$(sum_counts "dev:$id" "$counts")")" "$(number_or_null "$(sum_counts "nx:dev:$id" "$counts")")"
 	done
 	printf ']'
 }
 
 lan_json() {
 	enabled=false
-	[ "$(setting lan_dns)" = 1 ] && enabled=true
+	default_enabled && enabled=true
 	active=false
 	lan_redirect_present && dns_listening && active=true
-	retired=$(awk '{printf "%s\"%s\"", sep, $1; sep = ","}' "$(retired_file)" 2>/dev/null)
-	printf '{"enabled":%s,"active":%s,"profile":"%s","retired":[%s]}' \
-		"$enabled" "$active" "$(json_escape "$(setting lan_profile || echo adult)")" "$retired"
+	printf '{"enabled":%s,"active":%s,"profile":"%s"}' \
+		"$enabled" "$active" "$(json_escape "$(lan_profile)")"
 }
 
 cmd_status() {
@@ -706,7 +737,8 @@ cmd_status() {
 	printf ',"lan":'
 	lan_json
 	counts=$(rule_counts 2>/dev/null)
-	printf ',"queries":{"default":%s}' "$(number_or_null "$(sum_counts default "$counts")")"
+	printf ',"queries":{"default":%s,"default_blocked":%s}' \
+		"$(number_or_null "$(sum_counts default "$counts")")" "$(number_or_null "$(sum_counts nx:default "$counts")")"
 	printf ',"devices":'
 	devices_json "$counts"
 	printf '}\n'
@@ -718,6 +750,7 @@ case "$1" in
 	sync)      cmd_sync ;;
 	reconcile) cmd_reconcile ;;
 	watch)     cmd_watch ;;
+	migrate)   cmd_migrate ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
@@ -728,6 +761,7 @@ Usage: familydns <command>
   bootstrap [--background]   Set up DDNS, certificate, resolver, firewall and network DNS
   sync                       Re-render the resolver config from devices and profiles now
   reconcile                  Repair drift (cron hourly and on config change)
+  migrate                    Bring an older config up to date (runs on upgrade)
   watch                      Fail open: drop the LAN DNS redirect if the resolver stops (cron, every minute)
   profile <id>               Print an Apple DNS-over-TLS .mobileconfig for a device
   teardown                   Remove what bootstrap set up (the dnsdist package stays)

@@ -40,6 +40,17 @@ function withProgress(progress) {
 	return status({ progress: Object.assign({ running: false, state: 'idle', message: '', stages: [] }, progress) });
 }
 
+console.log('-> connection address');
+check('address is up to date', fmt.describeAddress(status({ wan_ip: '203.0.113.7', ddns_ip: '203.0.113.7', ddns_ok: true })),
+	{ text: 'Up to date (203.0.113.7)', ok: true, warn: false });
+check('address mismatch names both', fmt.describeAddress(status({ wan_ip: '203.0.113.7', ddns_ip: '198.51.100.1', ddns_ok: false })).text,
+	'Out of date: router 203.0.113.7, DuckDNS 198.51.100.1');
+check('address mismatch warns', fmt.describeAddress(status({ wan_ip: '203.0.113.7', ddns_ip: '198.51.100.1', ddns_ok: false })).warn, true);
+check('address not yet published', fmt.describeAddress(status({ wan_ip: '203.0.113.7', ddns_ip: null, ddns_ok: false })).text,
+	'Not published yet (203.0.113.7)');
+check('address without a WAN IP is an en dash', fmt.describeAddress(status({ wan_ip: null })).text, '–');
+check('address without status is an en dash', fmt.describeAddress(null).text, '–');
+
 console.log('-> client ids');
 check('slug from device name', fmt.slugify('Kid 1 iPhone'), 'kid-1-iphone');
 check('slug trims punctuation', fmt.slugify('  --Mum’s phone!! '), 'mum-s-phone');
@@ -59,9 +70,25 @@ check('space is invalid', fmt.validClientId('kid 1'), false);
 check('dot is invalid', fmt.validClientId('kid.1'), false);
 check('empty is invalid', fmt.validClientId(''), false);
 check('undefined is invalid', fmt.validClientId(undefined), false);
-check('duplicate id is detected', fmt.isDuplicate('kid1', ['adult', 'kid1']), true);
-check('unique id is accepted', fmt.isDuplicate('kid2', ['adult', 'kid1']), false);
-check('no others means unique', fmt.isDuplicate('kid1', []), false);
+const seq = function(list) { let i = 0; return function() { return list[i++]; }; };
+check('device id is the name slug plus a short suffix', fmt.deviceId('Landon\'s iPad', [], seq(['1a2b'])), 'landon-s-ipad-1a2b');
+check('device id is a valid client id', fmt.validClientId(fmt.deviceId('Kid 1 iPhone', [])), true);
+check('device id suffix is random hex by default', /^kid-[0-9a-f]{4}$/.test(fmt.deviceId('Kid', [])), true);
+check('device id retries when the suffix is taken', fmt.deviceId('Kid', [ 'kid-aaaa' ], seq(['aaaa', 'bbbb'])), 'kid-bbbb');
+check('device id of symbols is empty', fmt.deviceId('!!!', []), '');
+check('device id stays within a DNS label', fmt.deviceId(new Array(40).join('abc-'), [], seq(['ffff'])).length <= 63, true);
+check('device id never has a double dash', /--/.test(fmt.deviceId('a---b', [], seq(['0000']))), false);
+
+console.log('-> profile section ids');
+check('profile id from name', fmt.profileId('Adults'), 'adults');
+check('profile id uses underscores (UCI names)', fmt.profileId('Kids Filter!'), 'kids_filter');
+check('profile id is unique', fmt.profileId('Adults', [ 'adults' ]), 'adults_2');
+check('profile id skips taken ids in order', fmt.profileId('Adults', [ 'adults', 'adults_2' ]), 'adults_3');
+check('profile id may not be the settings section', fmt.profileId('settings'), 'settings_2');
+check('profile id of symbols is empty', fmt.profileId('!!!'), '');
+check('devices using a profile are counted', fmt.countDevicesUsing([ 'adult', 'kid', 'adult' ], 'adult'), 2);
+check('no devices use an unused profile', fmt.countDevicesUsing([ 'adult' ], 'kid'), 0);
+check('no device list counts zero', fmt.countDevicesUsing(undefined, 'kid'), 0);
 
 console.log('-> domain, email, port');
 check('duckdns domain is valid', fmt.validDomain('example.duckdns.org'), true);
@@ -122,11 +149,6 @@ check('one day is singular', fmt.describeCert({ present: true, days_left: 1, sta
 check('expired', fmt.describeCert({ present: true, days_left: 0, staging: false }), 'Expired');
 check('staging is tagged', fmt.describeCert({ present: true, days_left: 80, staging: true }), '80 days left (staging)');
 
-console.log('-> device rows');
-check('device not in status yet', fmt.describeDevice(undefined), { active: false, text: 'Not applied yet' });
-check('applied device shows its DoT host', fmt.describeDevice({ name: 'Kid 1 iPhone', client_id: 'kid1', profile: 'adult', dot_host: 'kid1.example.duckdns.org' }),
-	{ active: true, text: 'kid1.example.duckdns.org' });
-
 console.log('-> query counts');
 check('integer query count is shown', fmt.formatQueries(1234), (1234).toLocaleString());
 check('zero query count is shown', fmt.formatQueries(0), '0');
@@ -136,11 +158,6 @@ check('undefined query count is an en dash', fmt.formatQueries(undefined), '–'
 check('negative query count is an en dash', fmt.formatQueries(-1), '–');
 check('NaN query count is an en dash', fmt.formatQueries(NaN), '–');
 check('fractional query count is an en dash', fmt.formatQueries(1.5), '–');
-check('default path count is named', fmt.describeQueries({ default: 1234 }), 'Other devices on this network: ' + (1234).toLocaleString() + ' queries');
-check('default path zero is plural', fmt.describeQueries({ default: 0 }), 'Other devices on this network: 0 queries');
-check('default path one is singular', fmt.describeQueries({ default: 1 }), 'Other devices on this network: 1 query');
-check('default path unknown is an en dash', fmt.describeQueries({ default: null }), 'Other devices on this network: –');
-check('default path missing object is an en dash', fmt.describeQueries(undefined), 'Other devices on this network: –');
 check('query count note explains restarts', /restarts?/.test(fmt.queryCountDescription()), true);
 
 console.log('-> hostnames and profile commands');
@@ -162,25 +179,17 @@ check('idle waits 30 seconds', fmt.shouldFetch(false, 10000), false);
 check('idle fetches after 30 seconds', fmt.shouldFetch(false, 30000), true);
 check('isRunning on null', fmt.isRunning(null), false);
 
-console.log('-> network DNS (lan)');
-check('lan off when disabled', fmt.describeLan({ enabled: false, active: false, profile: 'adult', retired: [] }),
-	{ kind: 'off', text: 'Network DNS: off' });
-check('lan off when missing', fmt.describeLan(undefined), { kind: 'off', text: 'Network DNS: off' });
-check('lan active', fmt.describeLan({ enabled: true, active: true, profile: 'adult', retired: [] }),
-	{ kind: 'ready', text: 'Network DNS: via Family DNS' });
-check('lan enabled but inactive falls back to router DNS', fmt.describeLan({ enabled: true, active: false, profile: 'adult', retired: [] }),
-	{ kind: 'warning', text: 'Network DNS: waiting for the resolver - using router DNS' });
-check('two retired services are named', fmt.retiredNote({ enabled: true, active: true, retired: [ 'adblock', 'https-dns-proxy' ] }),
-	'adblock and https-dns-proxy are paused while this is on');
-check('one retired service is singular', fmt.retiredNote({ enabled: true, active: true, retired: [ 'adblock' ] }),
-	'adblock is paused while this is on');
-check('three retired services use commas', fmt.retiredNote({ enabled: true, active: true, retired: [ 'a', 'b', 'c' ] }),
-	'a, b and c are paused while this is on');
-check('no retired note while lan is off', fmt.retiredNote({ enabled: false, active: false, retired: [ 'adblock' ] }), '');
-check('no retired note without services', fmt.retiredNote({ enabled: true, active: true, retired: [] }), '');
-check('lan description names devices and paused services',
+console.log('-> network default (lan)');
+check('lan off when disabled', fmt.describeLan({ enabled: false, active: false, profile: 'adult' }),
+	{ kind: 'off', text: 'Off' });
+check('lan off when missing', fmt.describeLan(undefined), { kind: 'off', text: 'Off' });
+check('lan active', fmt.describeLan({ enabled: true, active: true, profile: 'adult' }),
+	{ kind: 'ready', text: 'Active' });
+check('lan enabled but inactive falls back to router DNS', fmt.describeLan({ enabled: true, active: false, profile: 'adult' }),
+	{ kind: 'warning', text: 'Waiting for the resolver - using router DNS' });
+check('lan description names devices',
 	fmt.lanDnsDescription(),
-	'All LAN DNS, including devices with hardcoded DNS servers, is redirected to Family DNS. adblock and https-dns-proxy are paused while this is on.');
+	'Every device on this network, including ones with hardcoded DNS servers, is sent through Family DNS.');
 
 console.log('-> stage order and labels');
 check('stage order lists lan last', fmt.STAGE_ORDER, [ 'ddns', 'cert', 'dnsdist', 'firewall', 'lan' ]);
@@ -197,6 +206,27 @@ check('describeState orders stages', fmt.describeState(withProgress({ running: t
 check('lan stage message is shown as label', fmt.describeState(withProgress({ state: 'error',
 	stages: [ { name: 'lan', state: 'error', message: 'redirect failed' } ] }), '853').text,
 	'Setup failed at Network DNS: redirect failed');
+
+console.log('-> profile upstream summaries');
+check('provider host and DoH filter name', fmt.upstreamName('https://doh.cleanbrowsing.org/doh/family-filter/'),
+	'doh.cleanbrowsing.org (family-filter)');
+check('generic DoH path shows only the host', fmt.upstreamName('https://dns10.quad9.net/dns-query'), 'dns10.quad9.net');
+check('https port is dropped from the label', fmt.upstreamName('https://dns.example.com:8443/dns-query'), 'dns.example.com');
+check('tls upstream shows its host', fmt.upstreamName('tls://one.one.one.one:853'), 'one.one.one.one');
+check('IPv4 upstream shows the address', fmt.upstreamName('1.1.1.1:53'), '1.1.1.1');
+check('summary of one upstream', fmt.upstreamSummary([ 'https://dns10.quad9.net/dns-query' ]), 'dns10.quad9.net');
+check('summary counts the rest', fmt.upstreamSummary([ 'https://doh.cleanbrowsing.org/doh/family-filter/', 'tls://one.one.one.one', '1.1.1.1' ]),
+	'doh.cleanbrowsing.org (family-filter) +2 more');
+check('summary of a single string value', fmt.upstreamSummary('tls://one.one.one.one'), 'one.one.one.one');
+check('summary ignores blank entries', fmt.upstreamSummary([ '', '  ', '1.1.1.1' ]), '1.1.1.1');
+check('summary with no upstreams', fmt.upstreamSummary(undefined), 'None set');
+
+console.log('-> provider guidance');
+check('provider list link is the AdGuard DNS providers page', fmt.PROVIDER_LIST_URL,
+	'https://adguard-dns.io/kb/general/dns-providers/');
+check('hint says quic and sdns are not supported', /quic:\/\/ and sdns:\/\/ entries are not supported/.test(fmt.upstreamHint()), true);
+check('error says quic and sdns are not supported', /quic:\/\/ and sdns:\/\/ entries are not supported/.test(fmt.upstreamError()), true);
+check('error names the accepted forms', /https:\/\/host\/path, tls:\/\/host or an IPv4 address/.test(fmt.upstreamError()), true);
 
 console.log('-> LAN addresses');
 check('plain IPv4 is valid', fmt.validLanIp('192.168.1.50'), true);
@@ -228,6 +258,8 @@ check('tls upstream with path is invalid', fmt.validUpstream('tls://dns.example.
 check('bare hostname is invalid', fmt.validUpstream('dns.example.com'), false);
 check('http upstream is invalid', fmt.validUpstream('http://dns.example.com/dns-query'), false);
 check('quic upstream is invalid', fmt.validUpstream('quic://dns.example.net'), false);
+check('quic upstream from the provider list is invalid', fmt.validUpstream('quic://dns.adguard-dns.com'), false);
+check('sdns stamp from the provider list is invalid', fmt.validUpstream('sdns://AQMAAAAAAAAAAAAOZG5zLmFkZ3VhcmQuY29t'), false);
 check('IPv4 octet 256 is invalid', fmt.validUpstream('256.1.1.1'), false);
 check('upstream port 0 is invalid', fmt.validUpstream('tls://dns.example.com:0'), false);
 check('upstream port 65536 is invalid', fmt.validUpstream('1.1.1.1:65536'), false);
@@ -244,6 +276,16 @@ validators.forEach(function(block, i) {
 check('clipboard use has an insecure-context fallback', !/navigator\.clipboard/.test(viewSource) || /execCommand/.test(viewSource), true);
 check('no option is marked required (blank rows and defaults must save)', /\.required = true/.test(viewSource), false);
 
+console.log('-> view wiring');
+check('provider links open in a new tab without opener access',
+	/'target': '_blank', 'rel': 'noopener noreferrer'/.test(viewSource), true);
+check('provider link uses the named constant', /fmt\.PROVIDER_LIST_URL/.test(viewSource), true);
+check('help text is not built as HTML (client id placeholder is plain text)',
+	!/<client-id>|<domain>/.test(viewSource), true);
+check('the settings upstream option is gone (the engine ignores it)',
+	!/Leave empty to keep the current upstreams/.test(viewSource), true);
+
+console.log('-> validator helpers');
 check('checkOptional accepts an empty string', fmt.checkOptional('', function() { return false; }, 'bad'), true);
 check('checkOptional accepts whitespace only', fmt.checkOptional('  ', function() { return false; }, 'bad'), true);
 check('checkOptional accepts an empty list', fmt.checkOptional([], function() { return false; }, 'bad'), true);
