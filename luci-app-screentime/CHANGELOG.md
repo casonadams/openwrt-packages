@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.2.1...luci-app-screentime-v1.3.0) (2026-11-02)
+
+
+### Features
+
+* **luci-app-familydns:** per-device AdGuard Home profiles over DoT ([e50fe86](https://github.com/casonadams/openwrt-packages/commit/e50fe86ae69ec47762d45da1d13b6772082512c5))
+
 ## [1.2.1](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.2.0...luci-app-screentime-v1.2.1) (2026-10-31)
 
 
