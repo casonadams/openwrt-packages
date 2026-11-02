@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.2...luci-app-familydns-v2.0.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **familydns:** profiles are upstream lists only; filtering comes from the upstream resolver.
+
+### Features
+
+* **familydns:** per-device and default query counters ([9610b71](https://github.com/casonadams/openwrt-packages/commit/9610b7108e8c4cf4187b754364e2d8e5f043822a))
+* **familydns:** replace AdGuard Home with dnsdist ([713e273](https://github.com/casonadams/openwrt-packages/commit/713e27338424fde316e20c02aa72690038eeb899))
+
+
+### Bug Fixes
+
+* **familydns:** apply the resolver immediately on upgrade ([cefa932](https://github.com/casonadams/openwrt-packages/commit/cefa932fffda0264df7d8ba01cf203debef4b54e))
+
 ## [1.0.2](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.1...luci-app-familydns-v1.0.2) (2026-11-02)
 
 
