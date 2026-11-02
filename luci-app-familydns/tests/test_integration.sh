@@ -40,6 +40,9 @@ assert_eq "dad resolves through the adult upstream" 10.0.0.2 "$(dot dad who.test
 assert_eq "an unknown device name gets the network profile" 10.0.0.1 "$(dot stranger who.test)"
 assert_eq "a dead profile upstream falls back to the fallback server" 10.0.0.3 "$(dot kid2 who.test)"
 assert_eq "local names are answered by dnsmasq" 192.168.1.1 "$(dot kid1 router.lan)"
+dot kid1 blocked.test >/dev/null
+dot kid1 blocked.test >/dev/null
+dot stranger blocked.test >/dev/null
 
 echo "-> Network-wide DNS through dnsdist"
 lan=$(in_container lan)
@@ -63,6 +66,9 @@ positive() { [ "${1:-0}" -gt 0 ] 2>/dev/null && echo yes || echo no; }
 assert_eq "kid1's queries are counted" yes "$(positive "$(field 'devices[0].queries')")"
 assert_eq "dad's queries are counted" yes "$(positive "$(field 'devices[1].queries')")"
 assert_eq "unmatched queries land in the default count" yes "$(positive "$(field 'queries.default')")"
+assert_eq "kid1's NXDOMAIN answers are counted (the second one comes from the cache)" 2 "$(field 'devices[0].blocked')"
+assert_eq "the default sender's NXDOMAIN answers are counted" yes "$(positive "$(field 'queries.default_blocked')")"
+assert_eq "a device with no NXDOMAIN answers shows zero" 0 "$(field 'devices[1].blocked')"
 profile=$(in_container profile)
 assert_eq "profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
 assert_eq "profile uses the DoT protocol" yes "$(echo "$profile" | grep -q '<string>TLS</string>' && echo yes)"

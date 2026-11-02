@@ -21,7 +21,9 @@ familydns.settings.domain=example.duckdns.org
 familydns.settings.duckdns_token=secret-token
 familydns.settings.email=me@example.com
 familydns.settings.dot_port=853
-familydns.settings.lan_profile=kids
+familydns.everyone=device
+familydns.everyone.name=Everyone else
+familydns.everyone.profile=kids
 familydns.settings.fallback=9.9.9.9
 familydns.kids=profile
 familydns.kids.name=Kids
@@ -45,6 +47,7 @@ CFG
 # shellcheck source=/dev/null
 . "$TEST_TMP/harness.sh"
 
+# shellcheck disable=SC2329
 uci_q() {
 	case "$1" in
 		get) awk -v k="$2" 'index($0, k "=") == 1 {print substr($0, length(k) + 2); exit}' "$FIXTURE" ;;
@@ -146,15 +149,18 @@ assert_eq "adult plain upstream keeps its port" yes "$(has 'address="1.1.1.1:535
 assert_eq "fallback servers come after every profile upstream" yes "$(has 'address="9.9.9.9:53", pool="kids", order=101')"
 assert_eq "an unused profile gets no pool" 0 "$(count 'pool="bare"')"
 assert_eq "per-address rate limit defaults to 500" yes "$(has 'MaxQPSIPRule(500, 32, 128)')"
-assert_eq "DoT names are matched by SNI" yes "$(has 'addAction(SNIRule("kid1.example.duckdns.org"), PoolAction("kids"), {name="dev:kid1"})')"
-assert_eq "a device's LAN address routes to its profile" yes "$(has 'addAction(NetmaskGroupRule("192.168.1.50"), PoolAction("kids"), {name="dev:kid1"})')"
+assert_eq "DoT names are matched by SNI and tagged" yes "$(has 'addAction(AndRule({SNIRule("kid1.example.duckdns.org"), NotRule(TagRule("who"))}), SetTagAction("who", "dev:kid1"), {name="dev:kid1"})')"
+assert_eq "a tagged query goes to its profile" yes "$(has 'addAction(TagRule("who", "dev:kid1"), PoolAction("kids"))')"
+assert_eq "an untagged query is the default sender" yes "$(has 'addAction(NotRule(TagRule("who")), SetTagAction("who", "default"), {name="default"})')"
+assert_eq "NXDOMAIN answers are counted per device, live and from the cache" 2 "$(count 'name="nx:dev:kid1"')"
+assert_eq "NXDOMAIN answers are counted for the default sender too" 2 "$(count 'name="nx:default"')"
+assert_eq "a device's LAN address tags it too, unless already tagged" yes "$(has 'addAction(AndRule({NetmaskGroupRule("192.168.1.50"), NotRule(TagRule("who"))}), SetTagAction("who", "dev:kid1"), {name="dev:kid1"})')"
 assert_eq "outside the LAN an unknown name is refused" yes "$(has 'SNIRule("kid1.example.duckdns.org"), SNIRule("dad.example.duckdns.org")}))}), RCodeAction(DNSRCode.REFUSED), {name="refused"})')"
 assert_eq "local names go to dnsmasq" yes "$(has 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"), {name="local"})')"
-assert_eq "everything else uses the network profile" yes "$(has 'addAction(AllRule(), PoolAction("kids"), {name="default"})')"
+assert_eq "everything else uses the network profile" yes "$(has 'addAction(TagRule("who", "default"), PoolAction("kids"))')"
 line_of() { printf '%s\n' "$conf" | grep -nF -- "$1" | head -n 1 | cut -d: -f1; }
-last=$(printf '%s\n' "$conf" | grep -v '^rc=' | tail -n 1)
-assert_eq "the default route is last" 'addAction(AllRule(), PoolAction("kids"), {name="default"})' "$last"
-assert_eq "the refuse rule comes before any device route" yes "$([ "$(line_of REFUSED)" -lt "$(line_of 'SNIRule("kid1.example.duckdns.org"), PoolAction')" ] && echo yes || echo no)"
+assert_eq "the default pool rule comes after the device pool rules" yes "$([ "$(line_of 'TagRule("who", "dev:kid1"), PoolAction')" -lt "$(line_of 'TagRule("who", "default"), PoolAction')" ] && echo yes || echo no)"
+assert_eq "the refuse rule comes before any tagging" yes "$([ "$(line_of REFUSED)" -lt "$(line_of 'SetTagAction("who", "dev:kid1")')" ] && echo yes || echo no)"
 
 { cat "$FIXTURE"; echo familydns.settings.ratelimit=0; } > "$FIXTURE.rl"
 assert_eq "rate limit 0 leaves it off" 0 "$(with_fixture "$FIXTURE.rl" render_dnsdist | grep -c MaxQPSIPRule)"
@@ -165,7 +171,7 @@ sed '/^familydns.@device/d' "$FIXTURE" > "$FIXTURE.nodev"
 assert_eq "without devices every outside source is refused" yes "$(with_fixture "$FIXTURE.nodev" render_dnsdist | grep -F 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED), {name="refused"})' >/dev/null && echo yes)"
 sed 's/^familydns.@device\[1\].profile=adult/familydns.@device[1].profile=ghost/' "$FIXTURE" > "$FIXTURE.ghost"
 with_fixture "$FIXTURE.ghost" render_dnsdist >/dev/null; assert_eq "a device with a missing profile is reported" "device 'dad' uses the missing profile 'ghost'" "$MSG"
-sed 's/^familydns.settings.lan_profile=.*/familydns.settings.lan_profile=ghost/' "$FIXTURE" > "$FIXTURE.langhost"
+sed 's/^familydns.everyone.profile=.*/familydns.everyone.profile=ghost/' "$FIXTURE" > "$FIXTURE.langhost"
 with_fixture "$FIXTURE.langhost" render_dnsdist >/dev/null; assert_eq "a missing network profile is reported" "network profile 'ghost' does not exist" "$MSG"
 sed 's/^familydns.@device\[0\].client_id=.*/familydns.@device[0].client_id=Bad_ID/' "$FIXTURE" > "$FIXTURE.badid"
 with_fixture "$FIXTURE.badid" render_dnsdist >/dev/null; assert_eq "an invalid client id is reported" "device 'Bad_ID' has an invalid client id" "$MSG"
@@ -189,19 +195,53 @@ assert_eq "the last good answer survives a DNS outage" 1.1.1.1 "$(resolve_upstre
 assert_eq "an IP literal is used as is" 192.0.2.9 "$(resolve_upstream_ip 192.0.2.9)"
 unset -f resolveip
 
+echo "-> default section"
+assert_eq "the default section names the network profile" kids "$(lan_profile)"
+assert_eq "network DNS is off until the default section enables it" no "$(default_enabled && echo yes || echo no)"
+{ cat "$FIXTURE"; echo familydns.everyone.enabled=1; } > "$FIXTURE.on"
+enabled_echo() { default_enabled && echo yes || echo no; }
+assert_eq "enabled=1 turns network DNS on" yes "$(with_fixture "$FIXTURE.on" enabled_echo)"
+sed '/^familydns.everyone/d' "$FIXTURE" > "$FIXTURE.legacy"
+{ cat "$FIXTURE.legacy"; echo familydns.settings.lan_profile=adult; echo familydns.settings.lan_dns=1; } > "$FIXTURE.legacy2"
+UCI_LOG="$TEST_TMP/uci.log"; : > "$UCI_LOG"
+# shellcheck disable=SC2329
+uci_q() {
+	case "$1" in
+		get) awk -v k="$2" 'index($0, k "=") == 1 {print substr($0, length(k) + 2); exit}' "$FIXTURE.legacy2" ;;
+		*) echo "$*" >> "$UCI_LOG" ;;
+	esac
+}
+migrate_default
+assert_eq "migration creates the section with the old profile" yes "$(grep -qx 'set familydns.everyone.profile=adult' "$UCI_LOG" && echo yes)"
+assert_eq "migration keeps network DNS on" yes "$(grep -qx 'set familydns.everyone.enabled=1' "$UCI_LOG" && echo yes)"
+assert_eq "migration removes the old settings" 2 "$(grep -c '^delete familydns.settings.lan_' "$UCI_LOG")"
+assert_eq "migration puts the section first" yes "$(grep -qx 'reorder familydns.everyone=0' "$UCI_LOG" && echo yes)"
+: > "$UCI_LOG"
+# shellcheck disable=SC2329
+uci_q() {
+	case "$1" in
+		get) awk -v k="$2" 'index($0, k "=") == 1 {print substr($0, length(k) + 2); exit}' "$FIXTURE" ;;
+		show) cat "$FIXTURE" ;;
+		*) return 1 ;;
+	esac
+}
+migrate_default
+assert_eq "migration does nothing when the section exists" 0 "$(wc -l < "$UCI_LOG" | tr -d ' ')"
+assert_eq "the default section is not a listed device" '@device[0] @device[1]' "$(device_sections | tr '\n' ' ' | sed 's/ $//')"
+
 echo "-> query counters"
 assert_eq "the API is loopback only and keyed" yes "$(has "webserver(\"127.0.0.1:8083\")")"
 key=$(api_key)
 assert_eq "the API key is generated once and kept" "$key" "$(api_key)"
 assert_eq "the API key is in the config" yes "$(render_dnsdist | grep -F "apiKey=\"$key\"" >/dev/null && echo yes)"
 assert_eq "the API key file is not world readable" 600 "$(stat -c %a "$STATE_DIR/api.key" 2>/dev/null || stat -f %Lp "$STATE_DIR/api.key")"
-assert_eq "every rule is named so counts line up" 0 "$(printf '%s\n' "$conf" | grep '^addAction' | grep -vc 'name=')"
+assert_eq "every rule is named so counts line up" 0 "$(printf '%s\n' "$conf" | grep '^add[A-Za-z]*Action' | grep -v 'PoolAction' | grep -vc 'name=')"
 # shellcheck disable=SC2329
 wget() {
-	printf '%s' '{"rules": [{"action": "drop", "action-stats": {"": 0}, "creationOrder": 0, "id": 0, "matches": 0, "name": "limited", "rule": "x", "uuid": "a"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 1, "id": 1, "matches": 7, "name": "dev:kid1", "rule": "SNI", "uuid": "b"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 2, "id": 2, "matches": 5, "name": "dev:kid1", "rule": "Src", "uuid": "c"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 3, "id": 3, "matches": 1200, "name": "default", "rule": "All", "uuid": "d"}]}'
+	printf '%s' '{"rules": [{"action": "drop", "action-stats": {"": 0}, "creationOrder": 0, "id": 0, "matches": 0, "name": "limited", "rule": "x", "uuid": "a"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 1, "id": 1, "matches": 7, "name": "dev:kid1", "rule": "SNI", "uuid": "b"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 2, "id": 2, "matches": 5, "name": "dev:kid1", "rule": "Src", "uuid": "c"}, {"action": "to pool kids", "action-stats": {"": 0}, "creationOrder": 3, "id": 3, "matches": 1200, "name": "default", "rule": "All", "uuid": "d"}, {"action": "allow", "action-stats": {"": 0}, "creationOrder": 4, "id": 0, "matches": 3, "name": "nx:dev:kid1", "rule": "x", "uuid": "e"}, {"action": "allow", "action-stats": {"": 0}, "creationOrder": 5, "id": 1, "matches": 2, "name": "nx:dev:kid1", "rule": "x", "uuid": "f"}, {"action": "allow", "action-stats": {"": 0}, "creationOrder": 6, "id": 2, "matches": 9, "name": "nx:default", "rule": "x", "uuid": "g"}]}'
 }
 counts=$(rule_counts)
-assert_eq "rule counts are read from the API body" "limited 0 dev:kid1 7 dev:kid1 5 default 1200" "$(echo "$counts" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "rule counts are read from the API body" "limited 0 dev:kid1 7 dev:kid1 5 default 1200 nx:dev:kid1 3 nx:dev:kid1 2 nx:default 9" "$(echo "$counts" | tr '\n' ' ' | sed 's/ $//')"
 assert_eq "a device's SNI and LAN rules are added up" 12 "$(sum_counts dev:kid1 "$counts")"
 assert_eq "a rule that never matched is zero, not missing" 0 "$(sum_counts limited "$counts")"
 assert_eq "the default path is counted" 1200 "$(sum_counts default "$counts")"
@@ -213,6 +253,8 @@ devs=$(devices_json "$counts")
 assert_eq "devices JSON is valid" yes "$(json_ok "$devs")"
 assert_eq "a device carries its summed queries" 12 "$(json_get "$devs" 'at(0).queries')"
 assert_eq "a device without counters is null" null "$(json_get "$devs" 'at(1).queries')"
+assert_eq "a device carries its blocked answers, live and cached" 5 "$(json_get "$devs" 'at(0).blocked')"
+assert_eq "the default sender's blocked answers are counted" 9 "$(sum_counts nx:default "$counts")"
 assert_eq "devices JSON without any counts is valid" yes "$(json_ok "$(devices_json "")")"
 # shellcheck disable=SC2329
 wget() { return 1; }

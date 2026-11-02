@@ -22,7 +22,7 @@ load_engine() {
 
 fake_upstream() {
 	dnsmasq --conf-file=/dev/null --port="$1" --listen-address=127.0.0.1 --bind-interfaces --no-resolv --no-hosts \
-		--address="/who.test/$2" --pid-file="/tmp/dnsmasq-$1.pid"
+		--address="/who.test/$2" --address=/blocked.test/ --pid-file="/tmp/dnsmasq-$1.pid"
 }
 
 case "$1" in
@@ -35,7 +35,6 @@ setup)
 	uci set familydns.settings.domain=test.duckdns.org
 	uci set familydns.settings.duckdns_token=unused
 	uci set familydns.settings.email=ci@example.com
-	uci set familydns.settings.lan_profile=kids
 	uci -q delete familydns.kids.upstream
 	uci -q delete familydns.adult.upstream
 	uci add_list familydns.kids.upstream=127.0.0.1:5391
@@ -72,14 +71,14 @@ EOT
 	;;
 lan)
 	load_engine
-	uci set familydns.settings.lan_dns=1
+	uci set familydns.everyone.enabled=1
 	uci commit familydns
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
 	echo "redirect: '$(uci -q get firewall.familydns_lan_dns)' to port '$(uci -q get firewall.familydns_lan_dns.dest_port)' proto '$(uci -q get firewall.familydns_lan_dns.proto)'"
 	;;
 lan-off)
 	load_engine
-	uci set familydns.settings.lan_dns=0
+	uci set familydns.everyone.enabled=0
 	uci commit familydns
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
 	echo "redirect after off: '$(uci -q get firewall.familydns_lan_dns)'"
@@ -88,7 +87,7 @@ status) familydns status ;;
 profile) familydns profile kid1 ;;
 resync)
 	load_engine
-	uci delete "familydns.@device[1]"
+	uci delete "familydns.@device[2]"
 	uci commit familydns
 	apply_dnsdist
 	sleep 3
