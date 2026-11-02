@@ -2,7 +2,7 @@
 
 Give each family device its own DNS profile, reachable from anywhere over DNS-over-TLS. Phones keep your router's filtering on cellular and public Wi-Fi. A profile is a list of upstream resolvers (the defaults use CleanBrowsing's family filter for kids and its adult filter for adults), so the filtering is whatever the upstream does.
 
-How it works: a DuckDNS name keeps pointing at your router, Let's Encrypt issues a wildcard certificate for it, and [dnsdist](https://dnsdist.org) serves DNS-over-TLS on port 853. Each device uses `<device-id>.<your-name>.duckdns.org`; dnsdist reads that hostname from the TLS handshake (SNI) and sends the query to the device's profile. iPhones install a generated `.mobileconfig`; on a supervised iPhone the profile can be locked so it can't be removed.
+How it works: a DuckDNS name keeps pointing at your router, Let's Encrypt issues a wildcard certificate for it, and [dnsdist](https://dnsdist.org) serves DNS-over-TLS on port 853. Each device uses `<device-id>.<your-name>.duckdns.org`; dnsdist reads that hostname from the TLS handshake (SNI) and sends the query to the device's profile. iPhones install a generated `.mobileconfig`.
 
 Install: see the [repository README](../README.md#install). `dnsmasq` stays the DHCP server and answers local names; dnsdist listens on port 5300 plus public DoT on 853. With *Use Family DNS for this network's DNS* on, LAN port 53 is redirected to dnsdist, so devices without a profile use the network profile. A leftover AdGuard Home from an earlier version is stopped and disabled on the next setup or reconcile; remove it with `apk del adguardhome`.
 
@@ -19,7 +19,6 @@ The Devices table has a *Queries* column, and the header shows how many queries 
 - **Rate limit:** each client address is limited on its own, default 500 queries/s (*Queries per second per device*; 0 turns it off).
 - **Failover:** a profile uses its first upstream and moves to the next one when it is down. *Fallback DNS servers* (default: CleanBrowsing's family filter plus its plain-IP resolver) are tried last, after every upstream of the profile, so a dead profile server still resolves, safely but without your extra filters. That covers a dead upstream. If the router or the DoT port itself is unreachable, generated profiles set `AllowFailover` (iOS 26 and later) so the iPhone uses the network's own DNS instead of losing resolution; that fallback is the network's resolver, so it is not filtered. Turn it off with *Let iPhones fall back to the network DNS*.
 - Port 853/TCP is opened on the WAN; nothing else is. Device ids act like secrets: a device only gets its profile if it knows its hostname. Queries from outside the LAN with an unknown hostname are refused; on the LAN they get the network profile.
-- A locked profile only prevents removal on supervised iPhones (Apple Configurator or MDM).
 - If your upstream filter blocks `duckdns.org`, setup adds a narrow `dnsmasq` rule for `www.duckdns.org` only; removing the package takes it out.
 - Requires a reachable public IPv4 address (no CGNAT) and a DuckDNS account.
 

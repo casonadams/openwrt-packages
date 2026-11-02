@@ -166,7 +166,7 @@ ensure_acme_uci() {
 	set_opt acme.familydns cert
 	set_opt acme.familydns.enabled 1
 	set_opt acme.familydns.staging "$(setting staging || echo 0)"
-	set_opt acme.familydns.keylength ec-256
+	set_opt acme.familydns.key_type ec256
 	set_opt acme.familydns.validation_method dns
 	set_opt acme.familydns.dns dns_duckdns
 	set_opt acme.familydns.dns_wait 60
@@ -573,13 +573,11 @@ cmd_profile() {
 		MC_CLIENT_ID=$id
 		MC_DOMAIN=$(domain)
 		MC_IP=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
-		MC_LOCK=0
-		[ "$2" = --lock ] && MC_LOCK=1
 		MC_FAILOVER=1
 		[ "$(setting allow_failover)" = 0 ] && MC_FAILOVER=0
 		MC_UUID1=$(new_uuid)
 		MC_UUID2=$(new_uuid)
-		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_FAILOVER MC_UUID1 MC_UUID2
+		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_FAILOVER MC_UUID1 MC_UUID2
 		mobileconfig
 		return 0
 	done
@@ -731,7 +729,7 @@ Usage: familydns <command>
   sync                       Re-render the resolver config from devices and profiles now
   reconcile                  Repair drift (cron hourly and on config change)
   watch                      Fail open: drop the LAN DNS redirect if the resolver stops (cron, every minute)
-  profile <id> [--lock]      Print an Apple DNS-over-TLS .mobileconfig for a device
+  profile <id>               Print an Apple DNS-over-TLS .mobileconfig for a device
   teardown                   Remove what bootstrap set up (the dnsdist package stays)
 EOF
 		;;

@@ -217,8 +217,8 @@ function mobileconfigFilename(clientId) {
 	return clientId + '.mobileconfig';
 }
 
-function profileArgs(clientId, locked) {
-	return [ 'profile', clientId ].concat(locked ? [ '--lock' ] : []);
+function profileArgs(clientId) {
+	return [ 'profile', clientId ];
 }
 
 function hasPendingChanges(changes) {

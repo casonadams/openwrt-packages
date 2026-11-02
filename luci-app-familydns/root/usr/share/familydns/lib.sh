@@ -122,10 +122,8 @@ server_lua() {
 	printf '})\n'
 }
 
-# mobileconfig: Apple DNS-over-TLS profile from MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_FAILOVER MC_UUID1 MC_UUID2
+# mobileconfig: Apple DNS-over-TLS profile from MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_FAILOVER MC_UUID1 MC_UUID2
 mobileconfig() {
-	lock=false
-	[ "$MC_LOCK" = 1 ] && lock=true
 	failover=""
 	[ "$MC_FAILOVER" = 1 ] && failover="<key>AllowFailover</key><true/>"
 	addresses=""
@@ -161,16 +159,12 @@ mobileconfig() {
 			<string>$MC_UUID1</string>
 			<key>PayloadVersion</key>
 			<integer>1</integer>
-			<key>ProhibitDisablement</key>
-			<$lock/>
 		</dict>
 	</array>
 	<key>PayloadDisplayName</key>
 	<string>$name DNS</string>
 	<key>PayloadIdentifier</key>
 	<string>familydns.$(xml_escape "$MC_CLIENT_ID")</string>
-	<key>PayloadRemovalDisallowed</key>
-	<$lock/>
 	<key>PayloadType</key>
 	<string>Configuration</string>
 	<key>PayloadUUID</key>

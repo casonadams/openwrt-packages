@@ -93,8 +93,8 @@ check('running shows stage list', fmt.describeState(withProgress({ running: true
 check('stage error names the stage and message', fmt.describeState(withProgress({ state: 'error', message: 'boom',
 	stages: [ { name: 'cert', state: 'error', message: 'rate limited' } ] }), '853').text,
 	'Setup failed at Certificate: rate limited');
-check('progress error without stage detail', fmt.describeState(withProgress({ state: 'error', message: 'lock held' }), '853').text,
-	'Setup failed: lock held');
+check('progress error without stage detail', fmt.describeState(withProgress({ state: 'error', message: 'busy' }), '853').text,
+	'Setup failed: busy');
 check('stage error beats not-configured', fmt.describeState(status({ configured: false,
 	progress: { running: false, state: 'error', message: '', stages: [ { name: 'ddns', state: 'error', message: 'token' } ] } }), '853').kind,
 	'error');
@@ -148,8 +148,7 @@ check('dot hostname', fmt.dotHostname('kid1', 'example.duckdns.org'), 'kid1.exam
 check('no dot hostname without client id', fmt.dotHostname('', 'example.duckdns.org'), '');
 check('no dot hostname without domain', fmt.dotHostname('kid1', ''), '');
 check('mobileconfig filename', fmt.mobileconfigFilename('kid1'), 'kid1.mobileconfig');
-check('plain profile command', fmt.profileArgs('kid1', false), ['profile', 'kid1']);
-check('locked profile command', fmt.profileArgs('kid1', true), ['profile', 'kid1', '--lock']);
+check('profile command', fmt.profileArgs('kid1'), ['profile', 'kid1']);
 
 console.log('-> setup gating and polling');
 check('pending changes are detected', fmt.hasPendingChanges({ familydns: [ [ 'set' ] ] }), true);

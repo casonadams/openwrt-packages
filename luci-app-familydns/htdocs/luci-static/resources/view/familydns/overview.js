@@ -11,6 +11,7 @@
 const ENGINE = '/usr/bin/familydns';
 const TICK_SECONDS = 5;
 const DEFAULT_PORT = '853';
+const LAN_COLORS = { ready: 'var(--success-color-high)', warning: 'var(--warning-color-high)' };
 
 const callExec = rpc.declare({
 	object: 'file',
@@ -37,8 +38,8 @@ function commandError(res) {
 	return new Error(((res.stderr || res.stdout || '') + '').trim() || _('command failed'));
 }
 
-function downloadProfile(clientId, locked) {
-	return callExec(ENGINE, fmt.profileArgs(clientId, locked)).then(function(res) {
+function downloadProfile(clientId) {
+	return callExec(ENGINE, fmt.profileArgs(clientId)).then(function(res) {
 		if (res.code !== 0)
 			throw commandError(res);
 		const url = URL.createObjectURL(new Blob([ res.stdout ], { type: 'application/x-apple-aspen-config' }));
@@ -48,23 +49,6 @@ function downloadProfile(clientId, locked) {
 		link.remove();
 		setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
 	});
-}
-
-function confirmLocked(clientId) {
-	ui.showModal(_('Locked profile'), [
-		E('p', {}, _('A locked profile cannot be removed on the iPhone. It only takes effect on supervised iPhones (Apple Configurator or MDM); other devices install it as a normal profile.')),
-		E('div', { 'class': 'right' }, [
-			E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Cancel')),
-			' ',
-			E('button', {
-				'class': 'btn cbi-button cbi-button-negative',
-				'click': function() {
-					ui.hideModal();
-					downloadProfile(clientId, true).catch(notifyError);
-				}
-			}, _('Download locked profile'))
-		])
-	]);
 }
 
 function badge(text, kind) {
@@ -118,9 +102,7 @@ return view.extend({
 		});
 		const paintHeader = function() {
 			const desc = fmt.describeState(state, port());
-			const lan = fmt.describeLan(state && state.lan);
-			const children = [ badge(desc.text, desc.kind), badge(lan.text, lan.kind) ];
-			children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;', 'title': fmt.queryCountDescription() }, fmt.describeQueries(state && state.queries)));
+			const children = [ badge(desc.text, desc.kind) ];
 			if (fmt.isRunning(state) && desc.stages.length) {
 				children.push(E('ul', { 'style': 'flex-basis:100%;margin:0;font-size:12px;' }, desc.stages.map(function(s) {
 					return E('li', {}, s.label + ': ' + s.state + (s.message ? ' – ' + s.message : ''));
@@ -131,9 +113,6 @@ return view.extend({
 					'WAN ' + (state.wan_ip || '–') + ' · DynDNS ' + (state.ddns_ip || '–') + ' · ' +
 					_('Certificate') + ': ' + fmt.describeCert(state.cert)));
 			}
-			const retired = fmt.retiredNote(state && state.lan);
-			if (retired)
-				children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' }, retired));
 			dom.content(header, children);
 		};
 
@@ -151,6 +130,24 @@ return view.extend({
 			const devices = (state && state.devices) || [];
 			const dev = devices.find(function(d) { return d.client_id === id; });
 			el.textContent = fmt.formatQueries(dev ? dev.queries : undefined);
+		};
+
+		const paintDefault = function(el) {
+			const lan = state && state.lan;
+			const key = el.getAttribute('data-familydns-default');
+			if (key === 'queries') {
+				el.textContent = fmt.describeQueries(state && state.queries);
+			} else if (key === 'retired') {
+				el.textContent = fmt.retiredNote(lan);
+			} else {
+				const desc = fmt.describeLan(lan);
+				el.style.color = LAN_COLORS[desc.kind] || '';
+				el.textContent = desc.text;
+			}
+		};
+
+		const paintDefaults = function() {
+			document.querySelectorAll('[data-familydns-default]').forEach(function(el) { paintDefault(el); });
 		};
 
 		const paintDevices = function() {
@@ -177,6 +174,7 @@ return view.extend({
 				lastFetch = Date.now();
 				paintHeader();
 				paintDevices();
+				paintDefaults();
 				return paintSetup();
 			});
 		};
@@ -255,15 +253,6 @@ return view.extend({
 		o.rmempty = false;
 		o.description = _('Generated profiles set AllowFailover (iOS 26 and later): if this router is unreachable the iPhone uses the network\'s own DNS instead of losing name resolution. That fallback is the network\'s own resolver, not Family DNS.');
 
-		o = s.option(form.Flag, 'lan_dns', _('Use Family DNS for this network\'s DNS'));
-		o.description = fmt.lanDnsDescription();
-		o.default = '0';
-
-		o = s.option(form.ListValue, 'lan_profile', _('Network profile'));
-		o.description = _('Profile whose upstreams serve every LAN device while the option above is on.');
-		o.default = 'adult';
-		profiles.forEach(function(p) { o.value(p.id, p.label); });
-
 		o = s.option(form.DynamicList, 'upstream', _('Upstream DNS servers (optional)'));
 		o.description = _('Examples: https://dns10.quad9.net/dns-query or tls://one.one.one.one. Leave empty to keep the current upstreams.');
 		o.placeholder = 'https://dns10.quad9.net/dns-query';
@@ -308,6 +297,38 @@ return view.extend({
 		o.description = _('One or more upstreams, one per entry: https://host/path (DoH), tls://host (DoT) or an IPv4 address. A profile needs at least one; with none, its devices resolve nothing.');
 		o.validate = function(_section_id, value) {
 			return fmt.checkOptional(value, fmt.validUpstream, _('Expecting https://host/path, tls://host or an IPv4 address, optionally with :port'));
+		};
+
+		s = m.section(form.NamedSection, 'settings', 'settings', _('Network default (everything else on this router)'),
+			_('Covers every device on this network that is not listed under Devices. Its counters appear below.'));
+
+		o = s.option(form.ListValue, 'lan_profile', _('Profile'));
+		o.description = _('Profile whose upstreams serve this network while the option below is on.');
+		o.default = 'adult';
+		profiles.forEach(function(p) { o.value(p.id, p.label); });
+		o.validate = function(_section_id, value) {
+			return fmt.checkOptional(value, function(v) { return profileIds.indexOf(v) >= 0; }, _('Choose an existing profile'));
+		};
+
+		o = s.option(form.Flag, 'lan_dns', _('Send this network\'s DNS through Family DNS'));
+		o.description = fmt.lanDnsDescription();
+		o.default = '0';
+
+		o = s.option(form.DummyValue, '_status', _('Status'));
+		o.renderWidget = function() {
+			const children = [
+				E('span', { 'data-familydns-default': 'status', 'style': 'font-weight:600;display:block;' }),
+				E('span', { 'data-familydns-default': 'retired', 'style': 'opacity:0.75;font-size:12px;display:block;' })
+			];
+			children.forEach(paintDefault);
+			return E('div', {}, children);
+		};
+
+		o = s.option(form.DummyValue, '_queries', _('Queries'));
+		o.renderWidget = function() {
+			const el = E('span', { 'data-familydns-default': 'queries', 'title': fmt.queryCountDescription() });
+			paintDefault(el);
+			return el;
 		};
 
 		s = m.section(form.TableSection, 'device', _('Devices'),
@@ -406,21 +427,13 @@ return view.extend({
 		o = s.option(form.DummyValue, '_actions', _('Profile file'));
 		o.renderWidget = function(section_id) {
 			const clientId = uci.get('familydns', section_id, 'client_id') || '';
-			const profileButton = function(label, locked, cls) {
-				const btn = E('button', { 'type': 'button', 'class': 'btn cbi-button ' + cls }, label);
-				btn.addEventListener('click', ui.createHandlerFn(self, function() {
-					if (!clientId)
-						return notifyError(new Error(_('Save the device before installing its profile.')));
-					if (locked)
-						return confirmLocked(clientId);
-					return downloadProfile(clientId, false).catch(notifyError);
-				}));
-				return btn;
-			};
-			return E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:6px;' }, [
-				profileButton(_('Install profile'), false, 'cbi-button-action'),
-				profileButton(_('Locked profile'), true, 'cbi-button-negative')
-			]);
+			const btn = E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-action' }, _('Install profile'));
+			btn.addEventListener('click', ui.createHandlerFn(self, function() {
+				if (!clientId)
+					return notifyError(new Error(_('Save the device before installing its profile.')));
+				return downloadProfile(clientId).catch(notifyError);
+			}));
+			return btn;
 		};
 
 		s = m.section(form.NamedSection, 'settings', 'settings');
@@ -431,8 +444,8 @@ return view.extend({
 				E('ol', {}, [
 					E('li', {}, _('Click Install profile (this downloads <client-id>.mobileconfig) and AirDrop the file to the iPhone, or open this page in Safari on the iPhone and tap Install profile.')),
 					E('li', {}, _('Tap the downloaded file, then go to Settings > General > VPN & Device Management, tap the profile and choose Install (enter the passcode).')),
-					E('li', {}, _('Important: go to Settings > General > VPN & Device Management > DNS and select this profile. Unsupervised iPhones must enable it; supervised iPhones activate it automatically.')),
-					E('li', {}, _('To remove: Settings > General > VPN & Device Management > the profile > Remove Profile. A Locked profile cannot be removed on a supervised iPhone.'))
+					E('li', {}, _('Important: go to Settings > General > VPN & Device Management > DNS and select this profile. Unmanaged iPhones must enable it; managed iPhones activate it automatically.')),
+					E('li', {}, _('To remove: Settings > General > VPN & Device Management > the profile > Remove Profile.'))
 				])
 			]);
 		};

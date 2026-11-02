@@ -64,8 +64,8 @@ assert_eq "kid1's queries are counted" yes "$(positive "$(field 'devices[0].quer
 assert_eq "dad's queries are counted" yes "$(positive "$(field 'devices[1].queries')")"
 assert_eq "unmatched queries land in the default count" yes "$(positive "$(field 'queries.default')")"
 profile=$(in_container profile)
-assert_eq "locked profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
-assert_eq "locked profile is locked" yes "$(echo "$profile" | grep -q '<true/>' && echo yes)"
+assert_eq "profile names the host" yes "$(echo "$profile" | grep -q '<string>kid1.test.duckdns.org</string>' && echo yes)"
+assert_eq "profile uses the DoT protocol" yes "$(echo "$profile" | grep -q '<string>TLS</string>' && echo yes)"
 
 echo "-> Turning network DNS off, removing a device, tearing down"
 off=$(in_container lan-off)

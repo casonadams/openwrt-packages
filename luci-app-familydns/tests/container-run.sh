@@ -85,7 +85,7 @@ lan-off)
 	echo "redirect after off: '$(uci -q get firewall.familydns_lan_dns)'"
 	;;
 status) familydns status ;;
-profile) familydns profile kid1 --lock ;;
+profile) familydns profile kid1 ;;
 resync)
 	load_engine
 	uci delete "familydns.@device[1]"
