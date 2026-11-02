@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.2](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.1...luci-app-familydns-v1.0.2) (2026-11-02)
+
+
+### Bug Fixes
+
+* **luci-app-familydns:** rate limit each device on its own ([b2f100f](https://github.com/casonadams/openwrt-packages/commit/b2f100fff9fbbedb1eea1869bb9365d8cc2e9158))
+* **luci-app-familydns:** rate limit each device on its own instead of sharing 20 queries/s per subnet ([fa0399e](https://github.com/casonadams/openwrt-packages/commit/fa0399e6b5c6335cb10db506cb54bb2825124dc6))
+
 ## [1.0.1](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v1.0.0...luci-app-familydns-v1.0.1) (2026-11-02)
 
 
