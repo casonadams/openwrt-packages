@@ -3,6 +3,8 @@
 if [ -x /etc/uci-defaults/99_familydns ]; then
 	/etc/uci-defaults/99_familydns && rm -f /etc/uci-defaults/99_familydns
 fi
+# Upgrade from an already set-up install: apply the new resolver now instead of at the next hourly reconcile.
+[ -e /etc/familydns/configured ] && /etc/init.d/familydns restart >/dev/null 2>&1
 rm -rf /tmp/luci-* /var/luci-* 2>/dev/null
 [ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload >/dev/null 2>&1
 exit 0
