@@ -65,8 +65,10 @@ lan)
 	load_engine
 	uci set familydns.settings.lan_dns=1
 	uci set familydns.settings.lan_profile=kids
+	uci -q delete familydns.kids.filtering
 	uci commit familydns
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
+	echo "filtering: $(agh_get /control/filtering/status | jsonfilter -e '@.enabled')"
 	echo "safesearch: $(agh_get /control/safesearch/status | jsonfilter -e '@.enabled')"
 	echo "parental: $(agh_get /control/parental/status | jsonfilter -e '@.enabled')"
 	echo "safebrowsing: $(agh_get /control/safebrowsing/status | jsonfilter -e '@.enabled')"

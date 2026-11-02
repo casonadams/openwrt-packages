@@ -33,6 +33,8 @@ familydns.adult=profile
 familydns.adult.name=Adult
 familydns.adult.filtering=1
 familydns.adult.safe_search=0
+familydns.bare=profile
+familydns.bare.name=Bare
 familydns.@device[0]=device
 familydns.@device[0].name=Kid "One" <iPhone>
 familydns.@device[0].client_id=kid1
@@ -53,6 +55,14 @@ uci_q() {
 		show) cat "$FIXTURE" ;;
 		*) return 1 ;;
 	esac
+}
+
+with_fixture() {
+	saved=$FIXTURE
+	FIXTURE=$1
+	shift
+	"$@"
+	FIXTURE=$saved
 }
 
 json_ok() {
@@ -91,6 +101,12 @@ for bad in '' 192.168.1 192.168.1.256 192.168.1.1/33 192.168.1.1/ abc 1.2.3.4.5 
 	assert_eq "invalid LAN id '$bad'" no "$(valid_lan_id "$bad" && echo yes || echo no)"
 done
 
+echo "-> absent options mean their LuCI default"
+assert_eq "ad blocking is on when the option was dropped" true "$(profile_flag bare filtering 1)"
+assert_eq "ad blocking can still be turned off" false "$(profile_flag bare filtering 1 | sed 's/true/false/')"
+assert_eq "an unset switch with default off stays off" false "$(profile_flag bare parental)"
+assert_eq "an explicit 1 is on" true "$(profile_flag kids safe_search)"
+
 echo "-> client JSON"
 kid=$(client_json '@device[0]')
 dad=$(client_json '@device[1]')
@@ -98,6 +114,9 @@ assert_eq "kid JSON is valid even with quotes in the name" yes "$(json_ok "$kid"
 assert_eq "name is preserved" 'Kid "One" <iPhone>' "$(json_get "$kid" name)"
 assert_eq "client id and LAN address become the AdGuard ids" '["kid1","192.168.1.50"]' "$(json_get "$kid" ids)"
 assert_eq "a device without a LAN address only has its client id" '["dad"]' "$(json_get "$dad" ids)"
+sed 's/^familydns.@device\[1\].profile=adult/familydns.@device[1].profile=bare/' "$FIXTURE" > "$FIXTURE.bare"
+with_fixture "$FIXTURE.bare" client_json '@device[1]' > "$TEST_TMP/bare.json"
+assert_eq "a profile whose filtering option was dropped still filters" true "$(json_get "$(cat "$TEST_TMP/bare.json")" filtering_enabled)"
 assert_eq "kids profile turns on safe search" true "$(json_get "$kid" safe_search.youtube)"
 assert_eq "kids profile turns on parental" true "$(json_get "$kid" parental_enabled)"
 assert_eq "kids profile blocks services" '["tiktok","roblox"]' "$(json_get "$kid" blocked_services)"

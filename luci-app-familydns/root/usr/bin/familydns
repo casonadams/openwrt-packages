@@ -396,7 +396,7 @@ apply_global_profile() {
 	for svc in $(uci_q get "familydns.$p.blocked_services"); do
 		services="$services${services:+,}\"$(json_escape "$svc")\""
 	done
-	agh_post /control/filtering/config "{\"enabled\":$(profile_flag "$p" filtering),\"interval\":24}" >/dev/null || return 1
+	agh_post /control/filtering/config "{\"enabled\":$(profile_flag "$p" filtering 1),\"interval\":24}" >/dev/null || return 1
 	agh_switch safesearch "$(profile_flag "$p" safe_search)" || return 1
 	agh_switch safebrowsing "$(profile_flag "$p" safebrowsing)" || return 1
 	agh_switch parental "$(profile_flag "$p" parental)" || return 1

@@ -70,8 +70,12 @@ valid_lan_id() {
 	} END {exit !ok}'
 }
 
+# profile_flag <profile> <option> [default 0|1]: LuCI drops an option that equals its form default, so an
+# absent option must mean the default (for example ad blocking is on unless explicitly set to 0).
 profile_flag() {
-	if [ "$(uci_q get "familydns.$1.$2")" = 1 ]; then echo true; else echo false; fi
+	v=$(uci_q get "familydns.$1.$2")
+	[ -n "$v" ] || v=${3:-0}
+	if [ "$v" = 1 ]; then echo true; else echo false; fi
 }
 
 # client_json <device section>: AdGuard Home persistent-client JSON for that device
@@ -96,7 +100,7 @@ client_json() {
 	if [ -n "$lan" ] && valid_lan_id "$lan"; then ids="$ids,\"$(json_escape "$lan")\""; fi
 	printf '{"name":"%s","ids":[%s],"tags":[],"upstreams":[%s],' "$(json_escape "$name")" "$ids" "$upstreams"
 	printf '"filtering_enabled":%s,"parental_enabled":%s,"safebrowsing_enabled":%s,"safesearch_enabled":%s,' \
-		"$(profile_flag "$prof" filtering)" "$(profile_flag "$prof" parental)" "$(profile_flag "$prof" safebrowsing)" "$ss"
+		"$(profile_flag "$prof" filtering 1)" "$(profile_flag "$prof" parental)" "$(profile_flag "$prof" safebrowsing)" "$ss"
 	printf '"safe_search":{"enabled":%s,"bing":%s,"duckduckgo":%s,"ecosia":%s,"google":%s,"pixabay":%s,"yandex":%s,"youtube":%s},' \
 		"$ss" "$ss" "$ss" "$ss" "$ss" "$ss" "$ss" "$ss"
 	printf '"blocked_services":[%s],"use_global_blocked_services":%s,"use_global_settings":false,' "$services" "$use_global"
