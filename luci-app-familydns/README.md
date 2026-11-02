@@ -16,6 +16,7 @@ The AdGuard Home admin UI is at `http://<router>:3001` (LAN only); its generated
 
 ## Notes
 
+- **Rate limit:** AdGuard Home's default (20 queries/s per /24 subnet) is shared by every device behind one LAN and drops bursts, so the package counts each address on its own with a default of 500 queries/s (*Queries per second per device*; 0 turns it off).
 - **Failover:** *Fallback DNS servers* (default: CleanBrowsing's family filter plus its plain-IP resolver) are used only when every upstream of a query fails, so a dead profile server still resolves, safely but without your extra filters. That covers a dead upstream. If the router or the DoT port itself is unreachable, generated profiles set `AllowFailover` (iOS 26 and later) so the iPhone uses the network's own DNS instead of losing resolution; that fallback is the network's resolver, so it is not filtered. Turn it off with *Let iPhones fall back to the network DNS*.
 - Port 853/TCP is opened on the WAN; nothing else is. Device ids act like secrets: a device only gets its profile if it knows its hostname, and unknown names still resolve with global settings.
 - A locked profile only prevents removal on supervised iPhones (Apple Configurator or MDM).

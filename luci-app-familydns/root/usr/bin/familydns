@@ -260,6 +260,15 @@ apply_fallback() {
 	agh_post /control/dns_config "{\"fallback_dns\":[$list]}" >/dev/null
 }
 
+# AdGuard Home's default (20 queries/s per /24) is shared by every LAN device behind one subnet and drops
+# bursts; limit each client address on its own instead.
+apply_ratelimit() {
+	limit=$(setting ratelimit)
+	limit=${limit:-500}
+	case "$limit" in *[!0-9]*) limit=500 ;; esac
+	agh_post /control/dns_config "{\"ratelimit\":$limit,\"ratelimit_subnet_len_ipv4\":32,\"ratelimit_subnet_len_ipv6\":128}" >/dev/null
+}
+
 ensure_tls() {
 	if [ "$(tls_current)" != "$(tls_wanted)" ]; then
 		agh_post /control/tls/configure "$(tls_body)" >/dev/null || { MSG="TLS configuration was rejected"; return 1; }
@@ -281,6 +290,7 @@ stage_agh() {
 	wait_for agh_ready 30 || { MSG="AdGuard Home API did not come up"; return 1; }
 	ensure_tls || return 1
 	apply_fallback || { MSG="could not set the fallback DNS servers"; return 1; }
+	apply_ratelimit || { MSG="could not set the AdGuard Home rate limit"; return 1; }
 	MSG="DoT enabled"
 }
 
@@ -542,6 +552,7 @@ cmd_reconcile() {
 	if wait_for agh_ready 30; then
 		ensure_tls
 		apply_fallback
+		apply_ratelimit
 	fi
 	stage_firewall
 	stage_clients
