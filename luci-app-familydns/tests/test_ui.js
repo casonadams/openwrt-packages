@@ -40,6 +40,30 @@ function withProgress(progress) {
 	return status({ progress: Object.assign({ running: false, state: 'idle', message: '', stages: [] }, progress) });
 }
 
+console.log('-> ad blocking');
+check('presets include the default first', fmt.blocklistPresets()[0].id, 'hagezi');
+check('every preset has a label and a name', fmt.blocklistPresets().every(function(p) { return p.label && p.name; }), true);
+check('presets can be switched off', fmt.blocklistPresets().some(function(p) { return p.id === 'off'; }), true);
+check('active list shows name and size', fmt.describeBlocklist({ preset: 'hagezi', active: true, domains: 175760, updated: 1 }),
+	{ name: 'HaGeZi Multi Normal', detail: (175760).toLocaleString() + ' domains' });
+check('a missing preset means the default', fmt.describeBlocklist({ preset: '', active: true, domains: 5 }).name, 'HaGeZi Multi Normal');
+check('a list not downloaded yet says so', fmt.describeBlocklist({ preset: 'stevenblack', active: false, domains: null }),
+	{ name: 'StevenBlack', detail: 'Not downloaded yet' });
+check('off says so', fmt.describeBlocklist({ preset: 'off', active: false }), { name: 'Off', detail: 'Ad blocking is off' });
+check('unknown status is an en dash', fmt.describeBlocklist(null).name, '–');
+check('updated today', fmt.formatUpdated(1000, 1000 + 3600), 'Today');
+check('updated yesterday', fmt.formatUpdated(1000, 1000 + 86400 + 5), 'Yesterday');
+check('updated days ago', fmt.formatUpdated(1000, 1000 + 3 * 86400), '3 days ago');
+check('unknown update time is an en dash', fmt.formatUpdated(null, 5), '–');
+check('allowed domain accepts a name', fmt.validAllowedDomain('ads.example.com'), true);
+check('allowed domain accepts a wildcard', fmt.validAllowedDomain('*.example.com'), true);
+check('allowed domain rejects a single label', fmt.validAllowedDomain('localhost'), false);
+check('allowed domain rejects a url', fmt.validAllowedDomain('https://example.com/'), false);
+check('list url accepts https', fmt.validListUrl('https://example.com/list.txt'), true);
+check('list url accepts http', fmt.validListUrl('http://10.0.0.5:8080/hosts'), true);
+check('list url rejects other schemes', fmt.validListUrl('ftp://example.com/list.txt'), false);
+check('list url needs a path', fmt.validListUrl('https://example.com'), false);
+
 console.log('-> connection address');
 check('address is up to date', fmt.describeAddress(status({ wan_ip: '203.0.113.7', ddns_ip: '203.0.113.7', ddns_ok: true })),
 	{ text: 'Up to date (203.0.113.7)', ok: true, warn: false });

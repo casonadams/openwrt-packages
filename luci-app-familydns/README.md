@@ -30,6 +30,15 @@ sh tests/run.sh   # unit tests, UI tests, and a containerised run against a real
 
 See [`AGENTS.md`](AGENTS.md) for the architecture.
 
+## Ad blocking
+
+One list is shared by every device and by the network default. Names on it get an NXDOMAIN answer from the router, before any upstream is asked, and they count in the *Blocked* column. Pick the list under **Ad blocking**; the default is [HaGeZi](https://github.com/hagezi/dns-blocklists) *Multi Normal* (about 176,000 domains, balanced). *Light* has the fewest wrong blocks, *Pro* is stricter, and [StevenBlack](https://github.com/StevenBlack/hosts)'s unified hosts list is the older, smaller alternative. A list of your own can be any hosts file, plain list of domains or simple adblock rules over http(s).
+
+- **Always block** and **Never block** take your own domains (with their subdomains). Never block wins over the list and over Always block; Always block works even with the list switched off.
+- The list is downloaded the first time it is needed and again every night at 04:41 (`familydns lists update`; *Update now* does the same). Dnsdist restarts when the list changed, about two seconds of no DNS.
+- Memory: dnsdist holds the list in a Lua table, roughly 150 bytes a domain (about 25 MB on top of its 12 MB for the largest list). The normalised list is stored in `/etc/familydns/blocklist.txt`.
+- An unreachable list address, or a download that is clearly not a list, keeps the previous list.
+
 ## Notes on upstreams
 
 - Find provider addresses in AdGuard's [DNS providers list](https://adguard-dns.io/kb/general/dns-providers/). Use its DNS-over-HTTPS (`https://...`) or DNS-over-TLS (`tls://...`) address, or a plain IPv4 address; `quic://` and `sdns://` entries are not supported.

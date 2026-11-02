@@ -342,9 +342,140 @@ rule_counts() {
 	printf '%s' "$body" | grep -o '"matches": *[0-9]*, *"name": *"[^"]*"' | sed 's/^"matches": *\([0-9]*\), *"name": *"\(.*\)"$/\2 \1/'
 }
 
+# blocked_total <tag value> <counts>: answers the filter or our blocklist refused for that sender
+blocked_total() {
+	printf '%s\n' "$2" | awk -v a="nx:$1" -v b="block:$1" '$1 == a || $1 == b {t += $2; seen = 1} END {if (seen) print t}'
+}
+
 # sum_counts <rule name> <counts>: total matches of every rule with that name, or nothing when counts is empty
 sum_counts() {
 	printf '%s\n' "$2" | awk -v n="$1" '$1 == n {t += $2; seen = 1} END {if (seen) print t}'
+}
+
+# --- ad blocking -----------------------------------------------------------
+# One shared list for every sender. dnsdist loads it into a Lua table at start (about 150 bytes a
+# domain, far less than its suffix tree) and a FFI rule walks the query name's parent domains.
+
+BLOCKLIST_FILE="${BLOCKLIST_FILE:-$STATE_DIR/blocklist.txt}"
+
+blocklist_preset() {
+	bl_p=$(setting blocklist)
+	echo "${bl_p:-hagezi}"
+}
+
+blocklist_source() {
+	case "$(blocklist_preset)" in
+		off) ;;
+		custom) setting blocklist_url ;;
+		*) blocklist_url "$(blocklist_preset)" ;;
+	esac
+}
+
+blocklist_enabled() {
+	[ -n "$(blocklist_source)" ]
+}
+
+file_mtime() {
+	stat -c %Y "$1" 2>/dev/null || date -r "$1" +%s 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# fetch_blocklist: download and normalise the configured list; the old file survives any failure
+fetch_blocklist() {
+	bl_url=$(blocklist_source)
+	[ -n "$bl_url" ] || return 1
+	mkdir -p "$STATE_DIR"
+	bl_raw="$BLOCKLIST_FILE.raw"
+	bl_new="$BLOCKLIST_FILE.new"
+	wget -q -T 60 -O "$bl_raw" "$bl_url" || { rm -f "$bl_raw"; MSG="could not download the blocklist"; return 1; }
+	normalize_blocklist < "$bl_raw" > "$bl_new"
+	rm -f "$bl_raw"
+	bl_min=1
+	[ "$(blocklist_preset)" = custom ] || bl_min=1000
+	if [ "$(wc -l < "$bl_new")" -lt "$bl_min" ]; then
+		rm -f "$bl_new"
+		MSG="the downloaded blocklist looks wrong"
+		return 1
+	fi
+	echo "$bl_url" > "$STATE_DIR/blocklist.src"
+	if cmp -s "$bl_new" "$BLOCKLIST_FILE"; then rm -f "$bl_new"; else mv "$bl_new" "$BLOCKLIST_FILE"; fi
+}
+
+# blocklist_ready: the configured list is on disk (fetched when missing or when the source changed)
+blocklist_ready() {
+	blocklist_enabled || return 1
+	if [ ! -s "$BLOCKLIST_FILE" ] || [ "$(cat "$STATE_DIR/blocklist.src" 2>/dev/null)" != "$(blocklist_source)" ]; then
+		fetch_blocklist
+	fi
+	[ -s "$BLOCKLIST_FILE" ]
+}
+
+# custom_domains <allow|block>: the domains the admin typed for that list, cleaned up
+custom_domains() {
+	# shellcheck disable=SC2046
+	printf '%s\n' $(setting "$1") | normalize_blocklist
+}
+
+list_sum() {
+	[ "$BLOCKLIST_FILE_ON" = 1 ] && md5sum "$BLOCKLIST_FILE" 2>/dev/null | cut -d' ' -f1
+}
+
+emit_blocklist() {
+	printf 'local blocklistFile = %s\n' "$(lua_str "$BLOCKLIST_FILE")"
+	echo 'local allowed = {}'
+	echo 'local blocked = {}'
+	for d in $(custom_domains allow); do
+		printf 'allowed[%s] = true\n' "$(lua_str "$d")"
+	done
+	for d in $(custom_domains block); do
+		printf 'blocked[%s] = true\n' "$(lua_str "$d")"
+	done
+	cat <<'LUA'
+local ffi = require("ffi")
+ffi.cdef[[
+typedef struct dnsdist_ffi_dnsquestion_t dnsdist_ffi_dnsquestion_t;
+void dnsdist_ffi_dnsquestion_get_qname_raw(const dnsdist_ffi_dnsquestion_t* dq, const char** qname, size_t* qnameSize);
+]]
+LUA
+	if [ "$BLOCKLIST_FILE_ON" = 1 ]; then
+		cat <<'LUA'
+for line in io.lines(blocklistFile) do blocked[line] = true end
+collectgarbage()
+LUA
+	fi
+	cat <<'LUA'
+
+local qptr, qlen = ffi.new("const char*[1]"), ffi.new("size_t[1]")
+local function queryName(dq)
+  ffi.C.dnsdist_ffi_dnsquestion_get_qname_raw(dq, qptr, qlen)
+  local raw, labels, i = ffi.string(qptr[0], qlen[0]), {}, 1
+  while i <= #raw do
+    local n = raw:byte(i)
+    if n == 0 then break end
+    labels[#labels + 1] = raw:sub(i + 1, i + n)
+    i = i + n + 1
+  end
+  return table.concat(labels, "."):lower()
+end
+local function listed(set, name)
+  while name do
+    if set[name] then return true end
+    local dot = name:find(".", 1, true)
+    if not dot then return false end
+    name = name:sub(dot + 1)
+  end
+  return false
+end
+local function isBlocked(dq)
+  local name = queryName(dq)
+  return listed(blocked, name) and not listed(allowed, name)
+end
+LUA
+}
+
+# emit_block <tag value>: answer NXDOMAIN to that sender's queries the blocklist matched
+emit_block() {
+	printf 'addAction(AndRule({TagRule("who", %s), TagRule("block")}), RCodeAction(DNSRCode.NXDOMAIN), {name=%s})\n' \
+		"$(lua_str "$1")" "$(lua_str "block:$1")"
 }
 
 # emit_nx <tag value>: count NXDOMAIN answers for that sender (the filter's "blocked" answer, plus
@@ -381,6 +512,13 @@ emit_routes() {
 		[ -z "$lan" ] || printf 'addAction(AndRule({NetmaskGroupRule(%s), NotRule(TagRule("who"))}), SetTagAction("who", %s), {name=%s})\n' "$(lua_str "$lan")" "$tag" "$tag"
 	done
 	echo 'addAction(NotRule(TagRule("who")), SetTagAction("who", "default"), {name="default"})'
+	if [ "$BLOCKLIST_ON" = 1 ]; then
+		echo 'addAction(LuaFFIRule(isBlocked), SetTagAction("block", "1"), {name="blocklist"})'
+		for sec in $(device_sections); do
+			emit_block "dev:$(uci_q get "familydns.$sec.client_id")"
+		done
+		emit_block default
+	fi
 	for sec in $(device_sections); do
 		printf 'addAction(TagRule("who", %s), PoolAction(%s))\n' "$(lua_str "dev:$(uci_q get "familydns.$sec.client_id")")" "$(lua_str "$(uci_q get "familydns.$sec.profile")")"
 	done
@@ -408,6 +546,13 @@ render_dnsdist() {
 		printf 'addTLSLocal(%s, %s, %s, {minTLSVersion="tls1.2"})\n' \
 			"$(lua_str "0.0.0.0:$(dot_port)")" "$(lua_str "$(cert_file fullchain.crt)")" "$(lua_str "$(cert_file key)")"
 	fi
+	BLOCKLIST_ON=0
+	BLOCKLIST_FILE_ON=0
+	blocklist_ready && BLOCKLIST_FILE_ON=1
+	if [ "$BLOCKLIST_FILE_ON" = 1 ] || [ -n "$(custom_domains block)" ]; then
+		BLOCKLIST_ON=1
+		emit_blocklist
+	fi
 	for p in $PROFILES; do emit_pool "$p" || return 1; done
 	emit_routes
 }
@@ -434,9 +579,12 @@ enable_dnsdist_service() {
 }
 
 # The old process keeps answering until the restart replaces it, so "listening" alone proves nothing
-# right after a restart; wait for a new process to be the one listening.
+# right after a restart; wait until every old process is gone and a new one is listening.
 dnsdist_settled() {
-	[ "$(pidof dnsdist)" != "$OLD_PID" ] && dns_listening
+	for pid in $OLD_PID; do
+		! kill -0 "$pid" 2>/dev/null || return 1
+	done
+	[ -n "$(pidof dnsdist)" ] && dns_listening
 }
 
 restart_dnsdist() {
@@ -451,15 +599,22 @@ apply_dnsdist() {
 	mkdir -p "$STATE_DIR"
 	new="$DNSDIST_CONF.new"
 	render_dnsdist > "$new" || { rm -f "$new"; return 1; }
-	dnsdist --check-config -C "$new" >/dev/null 2>&1 || { rm -f "$new"; MSG="the generated dnsdist config was rejected"; return 1; }
+	if ! err=$(dnsdist --check-config -C "$new" 2>&1); then
+		rm -f "$new"
+		MSG="the generated dnsdist config was rejected: $(printf '%s' "$err" | tail -n 1 | cut -c1-160)"
+		return 1
+	fi
 	sum=$(cert_sum)
 	changed=0
 	cmp -s "$new" "$DNSDIST_CONF" || changed=1
 	[ "$sum" = "$(cat "$STATE_DIR/cert.sum" 2>/dev/null)" ] || changed=1
+	lsum=$(list_sum)
+	[ "$lsum" = "$(cat "$STATE_DIR/list.sum" 2>/dev/null)" ] || changed=1
 	if [ "$changed" = 1 ]; then
 		chmod 600 "$new"
 		mv "$new" "$DNSDIST_CONF"
 		echo "$sum" > "$STATE_DIR/cert.sum"
+		echo "$lsum" > "$STATE_DIR/list.sum"
 		restart_dnsdist
 	else
 		rm -f "$new"
@@ -582,6 +737,18 @@ cmd_sync() {
 	apply_dnsdist && echo "applied"
 }
 
+cmd_lists() {
+	case "$1" in
+		update)
+			blocklist_enabled || { echo "ad blocking is off"; return 0; }
+			fetch_blocklist || { echo "$MSG" >&2; return 1; }
+			apply_dnsdist || { echo "$MSG" >&2; return 1; }
+			echo "updated"
+			;;
+		*) echo "usage: familydns lists update" >&2; return 1 ;;
+	esac
+}
+
 cmd_migrate() {
 	migrate_default
 }
@@ -695,7 +862,7 @@ devices_json() {
 		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","queries":%s,"blocked":%s}' \
 			"$(json_escape "$(uci_q get "familydns.$sec.name")")" "$(json_escape "$id")" \
 			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")" \
-			"$(number_or_null "$(sum_counts "dev:$id" "$counts")")" "$(number_or_null "$(sum_counts "nx:dev:$id" "$counts")")"
+			"$(number_or_null "$(sum_counts "dev:$id" "$counts")")" "$(number_or_null "$(blocked_total "dev:$id" "$counts")")"
 	done
 	printf ']'
 }
@@ -707,6 +874,19 @@ lan_json() {
 	lan_redirect_present && dns_listening && active=true
 	printf '{"enabled":%s,"active":%s,"profile":"%s"}' \
 		"$enabled" "$active" "$(json_escape "$(lan_profile)")"
+}
+
+blocklist_json() {
+	active=false
+	domains=null
+	updated=null
+	if blocklist_enabled && [ -s "$BLOCKLIST_FILE" ]; then
+		active=true
+		domains=$(wc -l < "$BLOCKLIST_FILE" | tr -d ' ')
+		updated=$(file_mtime "$BLOCKLIST_FILE")
+	fi
+	printf '{"preset":"%s","active":%s,"domains":%s,"updated":%s}' \
+		"$(json_escape "$(blocklist_preset)")" "$active" "$domains" "${updated:-null}"
 }
 
 cmd_status() {
@@ -738,7 +918,9 @@ cmd_status() {
 	lan_json
 	counts=$(rule_counts 2>/dev/null)
 	printf ',"queries":{"default":%s,"default_blocked":%s}' \
-		"$(number_or_null "$(sum_counts default "$counts")")" "$(number_or_null "$(sum_counts nx:default "$counts")")"
+		"$(number_or_null "$(sum_counts default "$counts")")" "$(number_or_null "$(blocked_total default "$counts")")"
+	printf ',"blocklist":'
+	blocklist_json
 	printf ',"devices":'
 	devices_json "$counts"
 	printf '}\n'
@@ -751,6 +933,7 @@ case "$1" in
 	reconcile) cmd_reconcile ;;
 	watch)     cmd_watch ;;
 	migrate)   cmd_migrate ;;
+	lists)     shift; cmd_lists "$@" ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
@@ -761,6 +944,7 @@ Usage: familydns <command>
   bootstrap [--background]   Set up DDNS, certificate, resolver, firewall and network DNS
   sync                       Re-render the resolver config from devices and profiles now
   reconcile                  Repair drift (cron hourly and on config change)
+  lists update               Download the ad-blocking list again and apply it (cron, daily)
   migrate                    Bring an older config up to date (runs on upgrade)
   watch                      Fail open: drop the LAN DNS redirect if the resolver stops (cron, every minute)
   profile <id>               Print an Apple DNS-over-TLS .mobileconfig for a device

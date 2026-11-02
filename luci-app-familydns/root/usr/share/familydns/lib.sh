@@ -175,3 +175,37 @@ mobileconfig() {
 </plist>
 PLIST
 }
+
+# blocklist_url <preset>: where a preset list comes from (empty for an unknown preset)
+blocklist_url() {
+	case "$1" in
+		hagezi-light) echo "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt" ;;
+		hagezi) echo "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/multi-onlydomains.txt" ;;
+		hagezi-pro) echo "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt" ;;
+		stevenblack) echo "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" ;;
+	esac
+}
+
+# normalize_blocklist: any common list format on stdin (domains, hosts files, simple adblock rules,
+# *.domain wildcards) -> one lowercase domain per line, sorted and unique, on stdout
+normalize_blocklist() {
+	awk '
+		# Fast path: most lines of a domain list are already clean (the slow path is ~10x dearer on the router)
+		/^#/ { next }
+		/^[a-z0-9][a-z0-9.-]*\.[a-z0-9-]+$/ && !/^[0-9.]+$/ && $0 != "localhost.localdomain" { print; next }
+		{
+			line = tolower($0)
+			sub(/\r$/, "", line)
+			sub(/[ \t]*[#!;].*$/, "", line)
+			if (line ~ /^[ \t]*$/ || line ~ /^@@/ || line ~ /[\/:]/) next
+			n = split(line, f, /[ \t]+/)
+			d = f[n]
+			if (n >= 2 && f[1] !~ /^[0-9.]+$/ && f[1] !~ /^::/) next
+			sub(/^\|\|/, "", d)
+			sub(/\^.*$/, "", d)
+			sub(/^\*\./, "", d)
+			sub(/\.$/, "", d)
+			if (d ~ /^[a-z0-9]([a-z0-9_-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?)+$/ && d !~ /^[0-9.]+$/ && d !~ /^(localhost|localhost\.localdomain|broadcasthost|local)$/)
+				print d
+		}' | sort -u
+}

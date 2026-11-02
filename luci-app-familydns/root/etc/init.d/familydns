@@ -13,8 +13,11 @@ set_cron() {
 	touch "$CRON_FILE"
 	sed -i '/familydns/d' "$CRON_FILE"
 	if [ "$1" = on ]; then
-		echo '17 * * * * /usr/bin/familydns reconcile >/dev/null 2>&1' >> "$CRON_FILE"
-		echo '* * * * * /usr/bin/familydns watch >/dev/null 2>&1' >> "$CRON_FILE"
+		{
+			echo '17 * * * * /usr/bin/familydns reconcile >/dev/null 2>&1'
+			echo '* * * * * /usr/bin/familydns watch >/dev/null 2>&1'
+			echo '41 4 * * * /usr/bin/familydns lists update >/dev/null 2>&1'
+		} >> "$CRON_FILE"
 	fi
 	/etc/init.d/cron restart >/dev/null 2>&1
 }

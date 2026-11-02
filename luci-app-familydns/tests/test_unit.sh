@@ -25,6 +25,7 @@ familydns.everyone=device
 familydns.everyone.name=Everyone else
 familydns.everyone.profile=kids
 familydns.settings.fallback=9.9.9.9
+familydns.settings.blocklist=off
 familydns.kids=profile
 familydns.kids.name=Kids
 familydns.kids.upstream=https://doh.cleanbrowsing.org/doh/family-filter/ tls://one.one.one.one
@@ -228,6 +229,69 @@ uci_q() {
 migrate_default
 assert_eq "migration does nothing when the section exists" 0 "$(wc -l < "$UCI_LOG" | tr -d ' ')"
 assert_eq "the default section is not a listed device" '@device[0] @device[1]' "$(device_sections | tr '\n' ' ' | sed 's/ $//')"
+
+echo "-> ad blocking"
+sed '/^familydns.settings.blocklist=/d' "$FIXTURE" > "$FIXTURE.nobl"
+assert_eq "hagezi is the default preset" hagezi "$(with_fixture "$FIXTURE.nobl" blocklist_preset)"
+assert_eq "preset urls are known" yes "$(blocklist_url hagezi | grep -q 'hagezi/dns-blocklists.*multi-onlydomains.txt' && echo yes)"
+assert_eq "stevenblack is a hosts file" yes "$(blocklist_url stevenblack | grep -q 'StevenBlack/hosts' && echo yes)"
+assert_eq "off has no source" "" "$(blocklist_source)"
+assert_eq "off means disabled" no "$(blocklist_enabled && echo yes || echo no)"
+# shellcheck disable=SC2016
+sample=$(printf '%s\n' '# c' 'Ads.Example.COM' '*.wild.example.net' '||adblock.example.org^$third-party' '@@||allowed.example.org^' '0.0.0.0 hosts.example.com' '127.0.0.1 localhost' '0.0.0.0 0.0.0.0' 'http://path.example.com/x' 'dup.example.com' 'dup.example.com' 'trailing.example.com.' 'single')
+assert_eq "lists of every common format become sorted unique domains" "adblock.example.org ads.example.com dup.example.com hosts.example.com trailing.example.com wild.example.net" "$(printf '%s\n' "$sample" | normalize_blocklist | tr '\n' ' ' | sed 's/ $//')"
+{ cat "$FIXTURE"; echo familydns.settings.blocklist=custom; echo familydns.settings.blocklist_url=http://list.test/l.txt; echo "familydns.settings.allow=ok.example.com Bad_Entry"; echo "familydns.settings.block=Mine.Example.ORG nonsense"; } > "$FIXTURE.bl"
+sed -i.bak '/^familydns.settings.blocklist=off/d' "$FIXTURE.bl"
+# shellcheck disable=SC2329
+wget() { printf '%s\n' ads.example.com tracker.example.net ok.example.com > "$5"; }
+# shellcheck disable=SC2329
+resolveip() { echo 1.1.1.1; }
+rm -f "$BLOCKLIST_FILE"
+conf=$(with_fixture "$FIXTURE.bl" render_dnsdist; echo "rc=$?")
+assert_eq "a custom list renders" rc=0 "$(echo "$conf" | tail -n 1)"
+assert_eq "the list was downloaded and normalised" "ads.example.com ok.example.com tracker.example.net" "$(tr '\n' ' ' < "$BLOCKLIST_FILE" | sed 's/ $//')"
+assert_eq "the source is remembered" http://list.test/l.txt "$(cat "$STATE_DIR/blocklist.src")"
+assert_eq "dnsdist loads the file" yes "$(has "local blocklistFile = \"$BLOCKLIST_FILE\"")"
+assert_eq "allowed domains are embedded, invalid ones dropped" 1 "$(count 'allowed[')"
+assert_eq "an allowed domain is listed" yes "$(has 'allowed["ok.example.com"] = true')"
+assert_eq "a custom blocked domain is lowercased and added, invalid ones dropped" 1 "$(count 'blocked["')"
+assert_eq "the custom blocked domain is there" yes "$(has 'blocked["mine.example.org"] = true')"
+assert_eq "the query name is read through FFI" yes "$(has 'LuaFFIRule(isBlocked)')"
+assert_eq "each sender gets a block rule" 3 "$(count 'RCodeAction(DNSRCode.NXDOMAIN), {name="block:')"
+assert_eq "the default sender is blocked too" yes "$(has '{name="block:default"}')"
+assert_eq "blocking comes after tagging and before routing" yes "$([ "$(line_of 'SetTagAction("who", "default")')" -lt "$(line_of 'LuaFFIRule(isBlocked)')" ] && [ "$(line_of 'LuaFFIRule(isBlocked)')" -lt "$(line_of 'TagRule("who", "dev:kid1"), PoolAction')" ] && echo yes || echo no)"
+assert_eq "the list checksum tracks the file" "$(md5sum "$BLOCKLIST_FILE" 2>/dev/null | cut -d' ' -f1 || md5 -q "$BLOCKLIST_FILE")" "$(BLOCKLIST_FILE_ON=1 list_sum || true)"
+assert_eq "no checksum without blocking" "" "$(BLOCKLIST_ON=0 list_sum)"
+# shellcheck disable=SC2329
+wget() { printf '%s\n' a.example.com b.example.com > "$5"; }
+{ cat "$FIXTURE"; echo familydns.settings.blocklist=hagezi; } | sed '/^familydns.settings.blocklist=off/d' > "$FIXTURE.preset"
+cp "$BLOCKLIST_FILE" "$TEST_TMP/good.txt"
+rm -f "$STATE_DIR/blocklist.src"
+with_fixture "$FIXTURE.preset" fetch_blocklist >/dev/null; assert_eq "a suspiciously small preset download is refused" "the downloaded blocklist looks wrong" "$MSG"
+assert_eq "a refused download keeps the old list" "$(cat "$TEST_TMP/good.txt")" "$(cat "$BLOCKLIST_FILE")"
+# shellcheck disable=SC2329
+wget() { return 1; }
+with_fixture "$FIXTURE.bl" fetch_blocklist >/dev/null; assert_eq "a failed download is reported" "could not download the blocklist" "$MSG"
+assert_eq "a failed download keeps the old list" "$(cat "$TEST_TMP/good.txt")" "$(cat "$BLOCKLIST_FILE")"
+unset -f wget
+conf=$(render_dnsdist; echo "rc=$?")
+assert_eq "off renders no blocklist" 0 "$(count 'isBlocked')"
+{ cat "$FIXTURE"; echo familydns.settings.block=ads.test; } > "$FIXTURE.ownonly"
+conf=$(with_fixture "$FIXTURE.ownonly" render_dnsdist; echo "rc=$?")
+assert_eq "own blocked domains work without any downloaded list" yes "$(has 'blocked["ads.test"] = true')"
+assert_eq "they are enforced" yes "$(has 'LuaFFIRule(isBlocked)')"
+assert_eq "no list file is read" 0 "$(count 'io.lines')"
+assert_eq "no checksum without a downloaded list" "" "$(BLOCKLIST_FILE_ON=0 list_sum)"
+conf=$(render_dnsdist; echo "rc=$?")
+bj=$(blocklist_json)
+assert_eq "blocklist JSON is valid" yes "$(json_ok "$bj")"
+assert_eq "an off list is not active" false "$(json_get "$bj" active)"
+assert_eq "the preset is reported" off "$(json_get "$bj" preset)"
+assert_eq "blocked answers add the filter's and ours" 7 "$(blocked_total dev:kid1 "$(printf 'nx:dev:kid1 3\nblock:dev:kid1 4\nnx:default 9')")"
+assert_eq "no counters means unknown" "" "$(blocked_total dev:kid1 "")"
+# shellcheck disable=SC2329
+resolveip() { :; }
+unset -f resolveip
 
 echo "-> query counters"
 assert_eq "the API is loopback only and keyed" yes "$(has "webserver(\"127.0.0.1:8083\")")"
