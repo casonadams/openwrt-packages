@@ -5,7 +5,7 @@ LUCI_DEPENDS:=+dnsdist +resolveip +openssl-util +acme-acmesh +acme-acmesh-dnsapi
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-familydns
-PKG_VERSION:=1.0.2 # x-release-please-version
+PKG_VERSION:=2.0.0 # x-release-please-version
 PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=Cason Adams <https://github.com/casonadams>
