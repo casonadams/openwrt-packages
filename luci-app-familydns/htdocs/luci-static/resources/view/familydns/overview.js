@@ -29,17 +29,6 @@ function fetchStatus() {
 	}).catch(function() { return null; });
 }
 
-function fetchAdmin() {
-	return callExec(ENGINE, [ 'admin' ]).then(function(res) {
-		if (res.code !== 0)
-			throw commandError(res);
-		const creds = fmt.parseAdminJson(res.stdout);
-		if (!creds)
-			throw new Error(_('Unexpected response from the router'));
-		return creds;
-	});
-}
-
 function notifyError(err) {
 	ui.addNotification(null, E('p', _('Operation failed: %s').format(err.message || err)));
 }
@@ -76,56 +65,6 @@ function confirmLocked(clientId) {
 			}, _('Download locked profile'))
 		])
 	]);
-}
-
-// LuCI is usually served over plain HTTP, where navigator.clipboard does not exist.
-function copyText(text) {
-	if (navigator.clipboard && window.isSecureContext)
-		return navigator.clipboard.writeText(text);
-	return new Promise(function(resolve, reject) {
-		const area = E('textarea', { 'readonly': '', 'style': 'position:fixed;top:0;left:0;opacity:0;' });
-		area.value = text;
-		document.body.appendChild(area);
-		area.select();
-		area.setSelectionRange(0, text.length);
-		let ok = false;
-		try {
-			ok = document.execCommand('copy');
-		} catch (e) {
-			ok = false;
-		}
-		document.body.removeChild(area);
-		if (ok) resolve();
-		else reject(new Error(_('The browser blocked copying. Show the password and copy it by hand.')));
-	});
-}
-
-function copyPassword(password) {
-	return copyText(password).then(function() {
-		ui.addNotification(null, E('p', _('Password copied to the clipboard.')), 'info');
-	}, notifyError);
-}
-
-// Credentials live only in this DOM subtree; they are never logged or stored.
-function renderLogin(creds, onClose) {
-	const masked = '••••••••';
-	let shown = false;
-	const pw = E('code', {}, masked);
-	const reveal = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Show password'));
-	reveal.addEventListener('click', function() {
-		shown = !shown;
-		pw.textContent = shown ? creds.password : masked;
-		reveal.textContent = shown ? _('Hide password') : _('Show password');
-	});
-	const copy = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Copy password'));
-	copy.addEventListener('click', function() { copyPassword(creds.password); });
-	const close = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Hide login'));
-	close.addEventListener('click', onClose);
-	return [
-		E('div', {}, [ _('Username: '), E('code', {}, creds.username) ]),
-		E('div', { 'style': 'margin-top:4px;' }, [ _('Password: '), pw, ' ', reveal, ' ', copy ]),
-		E('div', { 'style': 'margin-top:6px;' }, [ close ])
-	];
 }
 
 function badge(text, kind) {
@@ -177,48 +116,6 @@ return view.extend({
 			'class': 'cbi-section',
 			'style': 'margin-bottom:16px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;'
 		});
-		const loginBox = E('div', {
-			'class': 'cbi-section',
-			'style': 'margin-bottom:16px;padding:12px 16px;display:none;'
-		});
-
-		const hideLogin = function() {
-			dom.content(loginBox, []);
-			loginBox.style.display = 'none';
-		};
-
-		const showLogin = function() {
-			return fetchAdmin().then(function(creds) {
-				dom.content(loginBox, [ E('strong', {}, _('AdGuard Home login')) ].concat(renderLogin(creds, hideLogin)));
-				loginBox.style.display = '';
-			}).catch(notifyError);
-		};
-
-		const openAdGuard = function() {
-			const win = window.open('', '_blank');
-			return fetchAdmin().then(function(creds) {
-				return copyText(creds.password).then(function() {
-					ui.addNotification(null, E('p', _('Password copied. Sign in as %s and paste it.').format(creds.username)), 'info');
-				}, function() {
-					ui.addNotification(null, E('p', _('Could not copy the password. Use Show login to copy it by hand.')));
-				}).then(function() {
-					if (win) win.location.href = creds.url;
-					else showLogin();
-				});
-			}).catch(function(err) {
-				if (win) win.close();
-				notifyError(err);
-			});
-		};
-
-		const adminButtons = function() {
-			const open = E('button', { 'type': 'button', 'class': 'btn cbi-button cbi-button-action important' }, _('Open AdGuard Home'));
-			open.addEventListener('click', ui.createHandlerFn(self, openAdGuard));
-			const login = E('button', { 'type': 'button', 'class': 'btn cbi-button' }, _('Show login'));
-			login.addEventListener('click', ui.createHandlerFn(self, showLogin));
-			return E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:6px;' }, [ open, login ]);
-		};
-
 		const paintHeader = function() {
 			const desc = fmt.describeState(state, port());
 			const lan = fmt.describeLan(state && state.lan);
@@ -236,10 +133,6 @@ return view.extend({
 			const retired = fmt.retiredNote(state && state.lan);
 			if (retired)
 				children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' }, retired));
-			if (state && state.agh && state.agh.running)
-				children.push(adminButtons());
-			else
-				hideLogin();
 			dom.content(header, children);
 		};
 
@@ -248,7 +141,7 @@ return view.extend({
 			const devices = (state && state.devices) || [];
 			const dev = devices.find(function(d) { return d.client_id === id; });
 			const desc = fmt.describeDevice(dev);
-			el.style.color = desc.active ? 'var(--success-color-high)' : (dev ? 'var(--warning-color-high)' : '');
+		el.style.color = desc.active ? 'var(--success-color-high)' : '';
 			el.textContent = desc.text;
 		};
 
@@ -298,17 +191,17 @@ return view.extend({
 		let nameOpt = null;
 
 		m = new form.Map('familydns', _('Family DNS'),
-			_('Give each family device its own AdGuard Home profile over DNS-over-TLS, reachable from anywhere.'));
+			_('Give each family device its own profile over DNS-over-TLS, reachable from anywhere.'));
 
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			paintHeader();
 			poll.add(tick, TICK_SECONDS);
-			return E('div', {}, [ header, loginBox ]);
+			return E('div', {}, [ header ]);
 		};
 
 		s = m.section(form.NamedSection, 'settings', 'settings', _('Setup'),
-			_('Save & Apply before running setup. Setup obtains the DuckDNS address and TLS certificate, configures AdGuard Home and opens the WAN DoT port.'));
+			_('Save & Apply before running setup. Setup obtains the DuckDNS address and TLS certificate, configures the resolver and opens the WAN DoT port.'));
 
 		o = s.option(form.Flag, 'enabled', _('Enable Family DNS'));
 		o.rmempty = false;
@@ -343,7 +236,7 @@ return view.extend({
 		o = s.option(form.Value, 'ratelimit', _('Queries per second per device'));
 		o.placeholder = '500';
 		o.rmempty = true;
-		o.description = _('AdGuard Home drops queries above this rate from one address. Every device is counted on its own. 0 turns the limit off.');
+		o.description = _('The resolver drops queries above this rate from one address. Every device is counted on its own. 0 turns the limit off.');
 		o.validate = function(_section_id, value) {
 			return fmt.checkOptional(value, function(v) { return /^\d+$/.test(v); }, _('Expecting a whole number'));
 		};
@@ -351,31 +244,31 @@ return view.extend({
 		o = s.option(form.Flag, 'allow_failover', _('Let iPhones fall back to the network DNS'));
 		o.default = '1';
 		o.rmempty = false;
-		o.description = _('Generated profiles set AllowFailover (iOS 26 and later): if this router is unreachable the iPhone uses the network\'s own DNS instead of losing name resolution. That fallback is the network\'s resolver, so it is not filtered.');
+		o.description = _('Generated profiles set AllowFailover (iOS 26 and later): if this router is unreachable the iPhone uses the network\'s own DNS instead of losing name resolution. That fallback is the network\'s own resolver, not Family DNS.');
 
-		o = s.option(form.Flag, 'lan_dns', _('Use AdGuard Home for this network\'s DNS'));
+		o = s.option(form.Flag, 'lan_dns', _('Use Family DNS for this network\'s DNS'));
 		o.description = fmt.lanDnsDescription();
 		o.default = '0';
 
 		o = s.option(form.ListValue, 'lan_profile', _('Network profile'));
-		o.description = _('Profile whose filters apply to every LAN device while the option above is on.');
+		o.description = _('Profile whose upstreams serve every LAN device while the option above is on.');
 		o.default = 'adult';
 		profiles.forEach(function(p) { o.value(p.id, p.label); });
 
 		o = s.option(form.DynamicList, 'upstream', _('Upstream DNS servers (optional)'));
-		o.description = _('Examples: https://dns10.quad9.net/dns-query or tls://one.one.one.one. Leave empty to keep the current AdGuard Home upstreams.');
+		o.description = _('Examples: https://dns10.quad9.net/dns-query or tls://one.one.one.one. Leave empty to keep the current upstreams.');
 		o.placeholder = 'https://dns10.quad9.net/dns-query';
 		o.rmempty = true;
 		o.validate = function(_section_id, value) {
-			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
+			return fmt.checkOptional(value, fmt.validUpstream, _('Expecting https://host/path, tls://host or an IPv4 address, optionally with :port'));
 		};
 
 		o = s.option(form.DynamicList, 'fallback', _('Fallback DNS servers (optional)'));
 		o.rmempty = true;
 		o.placeholder = 'https://doh.cleanbrowsing.org/doh/family-filter/';
-		o.description = _('Used only when every upstream of a query fails, so devices still get (filtered) DNS if their profile servers are down.');
+		o.description = _('Used only when every upstream of a profile is down, so devices still get DNS from these servers.');
 		o.validate = function(_section_id, value) {
-			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
+			return fmt.checkOptional(value, fmt.validUpstream, _('Expecting https://host/path, tls://host or an IPv4 address, optionally with :port'));
 		};
 
 		o = s.option(form.DummyValue, '_setup', _('Setup'));
@@ -391,7 +284,7 @@ return view.extend({
 		};
 
 		s = m.section(form.GridSection, 'profile', _('Profiles'),
-			_('Each profile sets the filters applied to the devices that use it.'));
+			_('Each profile sets the upstream DNS servers used by the devices that use it.'));
 		s.anonymous = false;
 		s.addremove = true;
 		s.modaltitle = _('Family DNS Profile');
@@ -399,37 +292,13 @@ return view.extend({
 		o = s.option(form.Value, 'name', _('Name'));
 		o.rmempty = true;
 
-		o = s.option(form.Flag, 'filtering', _('Ad blocking'));
-		o.default = '1';
-		o.editable = true;
-
-		o = s.option(form.Flag, 'safe_search', _('Safe search'));
-		o.default = '0';
-		o.editable = true;
-
-		o = s.option(form.Flag, 'parental', _('Parental control'));
-		o.default = '0';
-		o.editable = true;
-
-		o = s.option(form.Flag, 'safebrowsing', _('Safe browsing'));
-		o.default = '0';
-		o.editable = true;
-
-		o = s.option(form.MultiValue, 'blocked_services', _('Blocked services'));
-		o.modalonly = true;
-		const storedServices = [];
-		(uci.sections('familydns', 'profile') || []).forEach(function(p) {
-			[].concat(p.blocked_services || []).forEach(function(id) { storedServices.push(id); });
-		});
-		fmt.serviceOptions(storedServices).forEach(function(svc) { o.value(svc.id, svc.label); });
-
-		o = s.option(form.DynamicList, 'upstream', _('DNS servers (optional)'));
+		o = s.option(form.DynamicList, 'upstream', _('Upstream DNS servers'));
 		o.modalonly = true;
 		o.rmempty = true;
 		o.placeholder = 'https://doh.cleanbrowsing.org/doh/family-filter/';
-		o.description = _('Devices using this profile resolve through these upstreams (DoH, DoT, DoQ or plain IP), one per entry. Leave empty to use the AdGuard Home defaults.');
+		o.description = _('One or more upstreams, one per entry: https://host/path (DoH), tls://host (DoT) or an IPv4 address. A profile needs at least one; with none, its devices resolve nothing.');
 		o.validate = function(_section_id, value) {
-			return fmt.checkOptional(value, fmt.validUpstream, _('Enter one server per entry, without spaces'));
+			return fmt.checkOptional(value, fmt.validUpstream, _('Expecting https://host/path, tls://host or an IPv4 address, optionally with :port'));
 		};
 
 		s = m.section(form.TableSection, 'device', _('Devices'),

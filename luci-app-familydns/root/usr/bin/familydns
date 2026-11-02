@@ -1,21 +1,21 @@
 #!/bin/sh
 # /usr/bin/familydns
-# Backend for luci-app-familydns: per-device AdGuard Home profiles over DNS-over-TLS.
-# Stages (idempotent): ddns -> cert -> agh -> firewall -> clients. `bootstrap` runs them all.
+# Backend for luci-app-familydns: per-device DNS profiles over DNS-over-TLS, served by dnsdist.
+# Stages (idempotent): ddns -> cert -> dnsdist -> firewall -> lan. `bootstrap` runs them all.
 
 LIB="${FAMILYDNS_LIB:-/usr/share/familydns/lib.sh}"
 # shellcheck source=/dev/null
 . "$LIB"
 
-AGH_DIR="${AGH_DIR:-/etc/adguardhome}"
+DNSDIST_CONF="${DNSDIST_CONF:-/etc/dnsdist.conf}"
 ACME_SSL="${ACME_SSL:-/etc/ssl/acme}"
 ACME_STATE="${ACME_STATE:-/etc/acme}"
 STATE_DIR="${STATE_DIR:-/etc/familydns}"
 PROGRESS_FILE="${PROGRESS_FILE:-/tmp/familydns.progress}"
 PID_FILE="${PID_FILE:-/tmp/familydns.pid}"
 LOCK_DIR="${LOCK_DIR:-/tmp/familydns.lock}"
-AGH_DNS_PORT="${AGH_DNS_PORT:-5300}"
-STAGES="ddns cert agh firewall clients lan"
+DNS_PORT="${DNS_PORT:-5300}"
+STAGES="ddns cert dnsdist firewall lan"
 UPSTREAM_DNS="1.1.1.1"
 
 setting() {
@@ -24,29 +24,14 @@ setting() {
 
 domain() { setting domain; }
 dot_port() { setting dot_port || echo 853; }
-web_port() { setting web_port || echo 3001; }
 
 lan_ip() {
-	if [ -n "$AGH_WEB_IP" ]; then
-		echo "$AGH_WEB_IP"
+	if [ -n "$LAN_IP" ]; then
+		echo "$LAN_IP"
 		return
 	fi
 	ip=$(uci_q get network.lan.ipaddr)
 	echo "${ip%%/*}" | sed 's/^$/192.168.1.1/'
-}
-
-agh_url() { echo "http://$(lan_ip):$(web_port)"; }
-
-agh_auth() {
-	printf 'Authorization: Basic %s' "$(ucode -e "print(b64enc('$(cat "$AGH_DIR/admin.pass")'))")"
-}
-
-agh_get() {
-	wget -qO- -T10 --header="$(agh_auth)" "$(agh_url)$1"
-}
-
-agh_post() {
-	wget -qO- -T20 --header="$(agh_auth)" --header='Content-Type: application/json' --post-data="$2" "$(agh_url)$1"
 }
 
 wait_for() {
@@ -167,6 +152,11 @@ cert_present() {
 	[ -s "$(cert_file fullchain.crt)" ] && [ -s "$(cert_file key)" ]
 }
 
+cert_not_after() {
+	cert_present || return 0
+	enddate_iso "$(openssl x509 -noout -enddate -in "$(cert_file fullchain.crt)" 2>/dev/null | sed 's/^notAfter=//')"
+}
+
 ensure_acme_uci() {
 	TOUCHED=""
 	ACME_DIRTY=0
@@ -197,101 +187,206 @@ issue_cert() {
 	wait_for cert_present 300 || { MSG="certificate was not issued; see: logread -e acme"; return 1; }
 }
 
-install_cert() {
-	mkdir -p "$AGH_DIR/tls"
-	CERT_CHANGED=0
-	cmp -s "$(cert_file fullchain.crt)" "$AGH_DIR/tls/fullchain.pem" || {
-		cp "$(cert_file fullchain.crt)" "$AGH_DIR/tls/fullchain.pem"
-		CERT_CHANGED=1
-	}
-	cmp -s "$(cert_file key)" "$AGH_DIR/tls/privkey.pem" || {
-		cp "$(cert_file key)" "$AGH_DIR/tls/privkey.pem"
-		CERT_CHANGED=1
-	}
-	chmod 700 "$AGH_DIR/tls"
-	chmod 600 "$AGH_DIR/tls/privkey.pem"
-	chown -R adguardhome:adguardhome "$AGH_DIR/tls" 2>/dev/null
-	return 0
-}
-
 stage_cert() {
 	ensure_acme_uci
 	if ! cert_present || [ "$ACME_DIRTY" = 1 ]; then
 		issue_cert || return 1
 	fi
-	install_cert
 	MSG="certificate in place"
 }
 
-# --- stage: agh ------------------------------------------------------------
+# --- stage: dnsdist --------------------------------------------------------
 
-wizard_up() { wget -qO- -T3 http://127.0.0.1:3000/control/install/get_addresses >/dev/null 2>&1; }
-agh_ready() { [ -r "$AGH_DIR/admin.pass" ] && agh_get /control/status >/dev/null 2>&1; }
-agh_alive() { wizard_up || agh_ready; }
-
-agh_install() {
-	pw=$(head -c 24 /dev/urandom | md5sum | cut -c1-24)
-	body=$(printf '{"web":{"ip":"%s","port":%s},"dns":{"ip":"0.0.0.0","port":%s},"username":"admin","password":"%s"}' \
-		"$(lan_ip)" "$(web_port)" "$AGH_DNS_PORT" "$pw")
-	wget -qO- -T15 --header='Content-Type: application/json' --post-data="$body" \
-		http://127.0.0.1:3000/control/install/configure >/dev/null 2>&1 || { MSG="AdGuard Home setup call failed"; return 1; }
-	(umask 077 && printf 'admin:%s\n' "$pw" > "$AGH_DIR/admin.pass")
+device_sections() {
+	uci_q show familydns | sed -n 's/^familydns\.\(@device\[[0-9]*\]\)=device$/\1/p'
 }
 
-tls_body() {
-	printf '{"enabled":true,"server_name":"%s","force_https":false,"port_https":0,"port_dns_over_tls":%s,"port_dns_over_quic":0,"allow_unencrypted_doh":false,"certificate_path":"%s/tls/fullchain.pem","private_key_path":"%s/tls/privkey.pem"}' \
-		"$(domain)" "$(dot_port)" "$AGH_DIR" "$AGH_DIR"
+lan_domain() {
+	d=$(uci_q get "dhcp.@dnsmasq[0].domain")
+	echo "${d:-lan}"
 }
 
-tls_current() {
-	agh_get /control/tls/status | jsonfilter -e '@.enabled' -e '@.server_name' -e '@.port_dns_over_tls' -e '@.certificate_path' | tr '\n' ' '
+lan_profile() {
+	p=$(setting lan_profile)
+	echo "${p:-adult}"
 }
 
-tls_wanted() {
-	echo "true $(domain) $(dot_port) $AGH_DIR/tls/fullchain.pem "
+dns_listening() {
+	netstat -lun 2>/dev/null | grep -q ":$DNS_PORT "
 }
 
-# Used only when every upstream of a query fails, so a dead profile upstream still resolves (safely).
-apply_fallback() {
-	fb=$(setting fallback)
-	[ -n "$fb" ] || return 0
-	list=""
-	for u in $fb; do list="$list${list:+,}\"$(json_escape "$u")\""; done
-	agh_post /control/dns_config "{\"fallback_dns\":[$list]}" >/dev/null
+cert_sum() {
+	md5sum "$(cert_file fullchain.crt)" 2>/dev/null | cut -d' ' -f1
 }
 
-# AdGuard Home's default (20 queries/s per /24) is shared by every LAN device behind one subnet and drops
-# bursts; limit each client address on its own instead.
-apply_ratelimit() {
+# resolve_upstream_ip <host>: the IPv4 address dnsdist should dial; the last good answer survives a DNS outage
+resolve_upstream_ip() {
+	if valid_ipv4 "$1"; then
+		echo "$1"
+		return 0
+	fi
+	cache="$STATE_DIR/resolved/$1"
+	ip=$(resolveip -4 -t 3 "$1" 2>/dev/null | head -n 1)
+	if [ -z "$ip" ]; then
+		cat "$cache" 2>/dev/null
+		return 0
+	fi
+	if [ "$ip" != "$(cat "$cache" 2>/dev/null)" ]; then
+		mkdir -p "$STATE_DIR/resolved"
+		echo "$ip" > "$cache"
+	fi
+	echo "$ip"
+}
+
+# emit_servers <pool> <order offset> <upstream>...: one dnsdist server per resolvable upstream
+emit_servers() {
+	pool=$1
+	offset=$2
+	shift 2
+	n=0
+	for up in "$@"; do
+		n=$((n + 1))
+		parse_upstream "$up" || { MSG="invalid upstream '$up' for profile '$pool'"; return 1; }
+		ip=$(resolve_upstream_ip "$UP_HOST")
+		[ -n "$ip" ] || continue
+		server_lua "$pool" $((offset + n)) "$ip"
+		POOL_SERVERS=$((POOL_SERVERS + 1))
+	done
+}
+
+# emit_pool <profile>: the profile's upstreams first (by order), then the fallback servers, behind one cache
+emit_pool() {
+	ups=$(uci_q get "familydns.$1.upstream")
+	[ -n "$ups" ] || { MSG="profile '$1' has no upstream servers"; return 1; }
+	POOL_SERVERS=0
+	# shellcheck disable=SC2086
+	emit_servers "$1" 0 $ups || return 1
+	# shellcheck disable=SC2046
+	emit_servers "$1" 100 $(setting fallback) || return 1
+	[ "$POOL_SERVERS" -gt 0 ] || { MSG="profile '$1' has no reachable upstream (check the router's DNS)"; return 1; }
+	printf 'getPool(%s):setCache(newPacketCache(5000, {maxTTL=3600, maxNegativeTTL=300}))\n' "$(lua_str "$1")"
+}
+
+# Names that dnsmasq answers (DHCP hosts and reverse lookups) are forwarded to it instead of the profile upstreams.
+emit_local() {
+	echo 'newServer({address="127.0.0.1:53", pool="local", checkInterval=10})'
+	echo 'local localnames = newSuffixMatchNode()'
+	printf 'localnames:add(%s)\n' "$(lua_str "$(lan_domain).")"
+	for z in 10 168.192 254.169 $(seq 16 31 | sed 's/$/.172/'); do
+		printf 'localnames:add("%s.in-addr.arpa.")\n' "$z"
+	done
+	echo 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"))'
+}
+
+# validate_devices: sets SNI_RULES (comma-separated SNIRule(...) list) and PROFILES (every profile in use)
+validate_devices() {
+	dom=$(domain)
+	SNI_RULES=""
+	PROFILES=" $(lan_profile) "
+	[ -n "$(uci_q get "familydns.$(lan_profile)")" ] || { MSG="network profile '$(lan_profile)' does not exist"; return 1; }
+	for sec in $(device_sections); do
+		id=$(uci_q get "familydns.$sec.client_id")
+		valid_client_id "$id" || { MSG="device '$id' has an invalid client id"; return 1; }
+		lan=$(uci_q get "familydns.$sec.lan_ip")
+		[ -z "$lan" ] || valid_lan_id "$lan" || { MSG="device '$id' has an invalid LAN address '$lan'"; return 1; }
+		p=$(uci_q get "familydns.$sec.profile")
+		[ -n "$(uci_q get "familydns.$p")" ] || { MSG="device '$id' uses the missing profile '$p'"; return 1; }
+		case "$PROFILES" in *" $p "*) ;; *) PROFILES="$PROFILES$p " ;; esac
+		SNI_RULES="$SNI_RULES${SNI_RULES:+, }SNIRule($(lua_str "$id.$dom"))"
+	done
+}
+
+emit_routes() {
 	limit=$(setting ratelimit)
 	limit=${limit:-500}
 	case "$limit" in *[!0-9]*) limit=500 ;; esac
-	agh_post /control/dns_config "{\"ratelimit\":$limit,\"ratelimit_subnet_len_ipv4\":32,\"ratelimit_subnet_len_ipv6\":128}" >/dev/null
+	[ "$limit" -eq 0 ] || printf 'addAction(MaxQPSIPRule(%s, 32, 128), DropAction())\n' "$limit"
+	echo 'local private = newNMG()'
+	for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 127.0.0.0/8 fc00::/7 fe80::/10 ::1/128; do
+		printf 'private:addMask("%s")\n' "$net"
+	done
+	if [ -n "$SNI_RULES" ]; then
+		printf 'addAction(AndRule({NotRule(NetmaskGroupRule(private)), NotRule(OrRule({%s}))}), RCodeAction(DNSRCode.REFUSED))\n' "$SNI_RULES"
+	else
+		echo 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED))'
+	fi
+	emit_local
+	for sec in $(device_sections); do
+		id=$(uci_q get "familydns.$sec.client_id")
+		pool=$(lua_str "$(uci_q get "familydns.$sec.profile")")
+		printf 'addAction(SNIRule(%s), PoolAction(%s))\n' "$(lua_str "$id.$dom")" "$pool"
+		lan=$(uci_q get "familydns.$sec.lan_ip")
+		[ -z "$lan" ] || printf 'addAction(NetmaskGroupRule(%s), PoolAction(%s))\n' "$(lua_str "$lan")" "$pool"
+	done
+	printf 'addAction(AllRule(), PoolAction(%s))\n' "$(lua_str "$(lan_profile)")"
 }
 
-ensure_tls() {
-	if [ "$(tls_current)" != "$(tls_wanted)" ]; then
-		agh_post /control/tls/configure "$(tls_body)" >/dev/null || { MSG="TLS configuration was rejected"; return 1; }
-		sleep 2
-		wait_for agh_ready 30 || { MSG="AdGuard Home did not come back after the TLS change"; return 1; }
-	elif [ "$CERT_CHANGED" = 1 ]; then
-		/etc/init.d/adguardhome restart >/dev/null 2>&1
-		wait_for agh_ready 30
+# render_dnsdist: the whole dnsdist configuration on stdout. Plain DNS (from the LAN redirect) and public DoT share
+# one rule list: queries from outside the LAN must name a known device in the TLS SNI or they are refused.
+render_dnsdist() {
+	validate_devices || return 1
+	echo '-- Generated by familydns; edits are overwritten.'
+	echo 'setACL({"0.0.0.0/0", "::/0"})'
+	echo 'setServerPolicy(firstAvailable)'
+	echo 'setMaxUDPOutstanding(1024)'
+	echo 'setMaxTCPConnectionsPerClient(50)'
+	printf 'addLocal(%s)\n' "$(lua_str "127.0.0.1:$DNS_PORT")"
+	printf 'addLocal(%s)\n' "$(lua_str "$(lan_ip):$DNS_PORT")"
+	if cert_present; then
+		printf 'addTLSLocal(%s, %s, %s, {minTLSVersion="tls1.2"})\n' \
+			"$(lua_str "0.0.0.0:$(dot_port)")" "$(lua_str "$(cert_file fullchain.crt)")" "$(lua_str "$(cert_file key)")"
 	fi
+	for p in $PROFILES; do emit_pool "$p" || return 1; done
+	emit_routes
 }
 
-stage_agh() {
-	/etc/init.d/adguardhome enable >/dev/null 2>&1
-	if ! agh_alive; then
-		/etc/init.d/adguardhome start >/dev/null 2>&1
-		wait_for agh_alive 30 || { MSG="AdGuard Home did not start"; return 1; }
+dnsdist_restart() {
+	/etc/init.d/dnsdist restart >/dev/null 2>&1
+}
+
+# AdGuard Home owned these ports before; stop it right before dnsdist takes them over.
+retire_adguardhome() {
+	[ -x /etc/init.d/adguardhome ] || return 0
+	/etc/init.d/adguardhome enabled || pidof AdGuardHome >/dev/null 2>&1 || return 0
+	/etc/init.d/adguardhome stop >/dev/null 2>&1
+	/etc/init.d/adguardhome disable >/dev/null 2>&1
+}
+
+enable_dnsdist_service() {
+	TOUCHED=""
+	set_opt dnsdist.general.enabled 1
+	set_opt dnsdist.general.user dnsdist
+	set_opt dnsdist.general.group dnsdist
+	commit_touched
+	/etc/init.d/dnsdist enable >/dev/null 2>&1
+}
+
+# apply_dnsdist: render, validate, and restart dnsdist only when the config or the certificate changed
+apply_dnsdist() {
+	mkdir -p "$STATE_DIR"
+	new="$DNSDIST_CONF.new"
+	render_dnsdist > "$new" || { rm -f "$new"; return 1; }
+	dnsdist --check-config -C "$new" >/dev/null 2>&1 || { rm -f "$new"; MSG="the generated dnsdist config was rejected"; return 1; }
+	sum=$(cert_sum)
+	changed=0
+	cmp -s "$new" "$DNSDIST_CONF" || changed=1
+	[ "$sum" = "$(cat "$STATE_DIR/cert.sum" 2>/dev/null)" ] || changed=1
+	if [ "$changed" = 1 ]; then
+		mv "$new" "$DNSDIST_CONF"
+		echo "$sum" > "$STATE_DIR/cert.sum"
+		retire_adguardhome
+		dnsdist_restart
+	else
+		rm -f "$new"
+		dns_listening || { retire_adguardhome; dnsdist_restart; }
 	fi
-	if wizard_up; then agh_install || return 1; fi
-	wait_for agh_ready 30 || { MSG="AdGuard Home API did not come up"; return 1; }
-	ensure_tls || return 1
-	apply_fallback || { MSG="could not set the fallback DNS servers"; return 1; }
-	apply_ratelimit || { MSG="could not set the AdGuard Home rate limit"; return 1; }
-	MSG="DoT enabled"
+	wait_for dns_listening 15 || { MSG="dnsdist did not start; see: logread -e dnsdist"; return 1; }
+}
+
+stage_dnsdist() {
+	enable_dnsdist_service
+	apply_dnsdist || return 1
+	MSG="resolver running"
 }
 
 # --- stage: firewall -------------------------------------------------------
@@ -311,107 +406,7 @@ stage_firewall() {
 	MSG="WAN port $(dot_port) open"
 }
 
-# --- stage: clients --------------------------------------------------------
-
-device_sections() {
-	uci_q show familydns | sed -n 's/^familydns\.\(@device\[[0-9]*\]\)=device$/\1/p'
-}
-
-agh_client_names() {
-	agh_get /control/clients | jsonfilter -e '@.clients[*].ids[0]'
-}
-
-agh_client_name_for() {
-	agh_get /control/clients | jsonfilter -e "@.clients[@.ids[0]='$1'].name"
-}
-
-managed_file() { echo "$STATE_DIR/managed"; }
-
-delete_client() {
-	name=$(agh_client_name_for "$1")
-	[ -z "$name" ] || agh_post /control/clients/delete "$(printf '{"name":"%s"}' "$(json_escape "$name")")" >/dev/null
-}
-
-stage_clients() {
-	if ! wait_for agh_ready 30 || ! agh_get /control/clients >/dev/null; then
-		MSG="could not read AdGuard Home clients"
-		return 1
-	fi
-	mkdir -p "$STATE_DIR"
-	touch "$(managed_file)"
-	wanted=""
-	for sec in $(device_sections); do
-		id=$(uci_q get "familydns.$sec.client_id")
-		valid_client_id "$id" || { MSG="device '$id' has an invalid client id"; return 1; }
-		lan=$(uci_q get "familydns.$sec.lan_ip")
-		[ -z "$lan" ] || valid_lan_id "$lan" || { MSG="device '$id' has an invalid LAN address '$lan'"; return 1; }
-		wanted="$wanted $id"
-		existing=$(agh_client_name_for "$id")
-		if [ -n "$existing" ]; then
-			body=$(printf '{"name":"%s","data":%s}' "$(json_escape "$existing")" "$(client_json "$sec")")
-			agh_post /control/clients/update "$body" >/dev/null
-		else
-			agh_post /control/clients/add "$(client_json "$sec")" >/dev/null
-		fi || { MSG="could not apply client '$id'"; return 1; }
-		grep -qx "$id" "$(managed_file)" || echo "$id" >> "$(managed_file)"
-	done
-	stale=$(awk -v w=" $wanted " 'index(w, " " $0 " ") == 0' "$(managed_file)")
-	for id in $stale; do delete_client "$id"; done
-	: > "$(managed_file)"
-	for id in $wanted; do echo "$id" >> "$(managed_file)"; done
-	MSG="devices applied"
-}
-
-# --- stage: lan (use AdGuard Home for the whole network) --------------------
-
-lan_domain() {
-	d=$(uci_q get "dhcp.@dnsmasq[0].domain")
-	echo "${d:-lan}"
-}
-
-agh_listening() {
-	netstat -lun 2>/dev/null | grep -q ":$AGH_DNS_PORT "
-}
-
-lan_profile() {
-	p=$(setting lan_profile)
-	echo "${p:-adult}"
-}
-
-# Upstreams for the whole network: the network profile's, else the global setting, else what AdGuard Home has.
-dns_config_body() {
-	ups=$(uci_q get "familydns.$(lan_profile).upstream")
-	[ -n "$ups" ] || ups=$(setting upstream)
-	[ -n "$ups" ] || ups=$(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | tr '\n' ' ')
-	rule="[/$(lan_domain)/]127.0.0.1:53"
-	case " $ups " in *" $rule "*) ;; *) ups="$ups $rule" ;; esac
-	list=""
-	for u in $ups; do list="$list${list:+,}\"$(json_escape "$u")\""; done
-	printf '{"upstream_dns":[%s],"local_ptr_upstreams":["127.0.0.1:53"],"use_private_ptr_resolvers":true,"resolve_clients":true}' "$list"
-}
-
-agh_switch() {
-	action=disable
-	[ "$2" = true ] && action=enable
-	agh_post "/control/$1/$action" '{}' >/dev/null
-}
-
-apply_global_profile() {
-	p=$(lan_profile)
-	if [ -z "$(uci_q get "familydns.$p")" ]; then
-		MSG="network profile '$p' does not exist"
-		return 1
-	fi
-	services=""
-	for svc in $(uci_q get "familydns.$p.blocked_services"); do
-		services="$services${services:+,}\"$(json_escape "$svc")\""
-	done
-	agh_post /control/filtering/config "{\"enabled\":$(profile_flag "$p" filtering 1),\"interval\":24}" >/dev/null || return 1
-	agh_switch safesearch "$(profile_flag "$p" safe_search)" || return 1
-	agh_switch safebrowsing "$(profile_flag "$p" safebrowsing)" || return 1
-	agh_switch parental "$(profile_flag "$p" parental)" || return 1
-	agh_post /control/blocked_services/set "[$services]" >/dev/null
-}
+# --- stage: lan (use the resolver for the whole network) --------------------
 
 retired_file() { echo "$STATE_DIR/retired"; }
 
@@ -450,7 +445,7 @@ lan_redirect_on() {
 	set_opt firewall.familydns_lan_dns.src lan
 	set_opt firewall.familydns_lan_dns.proto "tcp udp"
 	set_opt firewall.familydns_lan_dns.src_dport 53
-	set_opt firewall.familydns_lan_dns.dest_port "$AGH_DNS_PORT"
+	set_opt firewall.familydns_lan_dns.dest_port "$DNS_PORT"
 	set_opt firewall.familydns_lan_dns.target DNAT
 	[ -z "$TOUCHED" ] && return 0
 	commit_touched
@@ -475,27 +470,21 @@ stage_lan() {
 		MSG="off"
 		return 0
 	fi
-	if ! wait_for agh_ready 30; then
-		MSG="AdGuard Home is not ready"
-		return 1
-	fi
-	agh_post /control/dns_config "$(dns_config_body)" >/dev/null || { MSG="could not set AdGuard Home upstreams"; return 1; }
-	apply_global_profile || { [ -n "$MSG" ] || MSG="could not apply the network profile"; return 1; }
 	retire_legacy
-	if agh_listening; then
+	if dns_listening; then
 		lan_redirect_on
-		MSG="network DNS goes through AdGuard Home"
+		MSG="network DNS goes through the resolver"
 	else
 		lan_redirect_off
-		MSG="AdGuard Home is not listening; the router keeps its own DNS"
+		MSG="the resolver is not listening; the router keeps its own DNS"
 		return 1
 	fi
 }
 
-# Fail open: keep the redirect only while AdGuard Home is actually listening.
+# Fail open: keep the redirect only while the resolver is actually listening.
 cmd_watch() {
 	[ -e "$STATE_DIR/configured" ] && [ "$(setting lan_dns)" = 1 ] || return 0
-	if agh_listening; then
+	if dns_listening; then
 		lan_redirect_present || lan_redirect_on
 	else
 		lan_redirect_off
@@ -537,36 +526,17 @@ cmd_bootstrap() {
 
 cmd_sync() {
 	[ -e "$STATE_DIR/configured" ] || { echo "not set up"; return 0; }
-	wait_for agh_ready 10 || { echo "AdGuard Home not ready"; return 1; }
-	stage_clients && echo "$MSG"
+	apply_dnsdist && echo "applied"
 }
 
 cmd_reconcile() {
 	[ -e "$STATE_DIR/configured" ] || return 0
 	mkdir "$LOCK_DIR" 2>/dev/null || return 0
 	trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
-	CERT_CHANGED=0
 	validate_settings || return 1
-	cert_present && install_cert
-	agh_ready || /etc/init.d/adguardhome start >/dev/null 2>&1
-	if wait_for agh_ready 30; then
-		ensure_tls
-		apply_fallback
-		apply_ratelimit
-	fi
+	stage_dnsdist
 	stage_firewall
-	stage_clients
 	stage_lan
-}
-
-cmd_admin() {
-	[ -r "$AGH_DIR/admin.pass" ] || { echo "AdGuard Home is not set up" >&2; return 1; }
-	cred=$(cat "$AGH_DIR/admin.pass")
-	if [ "$1" = --password ]; then
-		echo "${cred#*:}"
-		return 0
-	fi
-	printf '{"url":"%s","username":"%s","password":"%s"}\n' "$(agh_url)" "$(json_escape "${cred%%:*}")" "$(json_escape "${cred#*:}")"
 }
 
 cmd_profile() {
@@ -591,6 +561,14 @@ cmd_profile() {
 	return 1
 }
 
+dnsdist_off() {
+	/etc/init.d/dnsdist stop >/dev/null 2>&1
+	/etc/init.d/dnsdist disable >/dev/null 2>&1
+	uci_q set dnsdist.general.enabled=0
+	uci_q commit dnsdist
+	: > "$DNSDIST_CONF"
+}
+
 cmd_teardown() {
 	/etc/init.d/familydns stop >/dev/null 2>&1
 	lan_off
@@ -602,7 +580,7 @@ cmd_teardown() {
 		uci_q commit dhcp
 		/etc/init.d/dnsmasq reload >/dev/null 2>&1
 	fi
-	while read -r id; do delete_client "$id"; done < "$(managed_file)" 2>/dev/null
+	dnsdist_off
 	rm -rf "$STATE_DIR" "$PROGRESS_FILE" "$PID_FILE" /var/run/ddns/familydns.*
 	echo "removed"
 }
@@ -647,18 +625,15 @@ json_or_null() {
 bool() { if "$@" >/dev/null 2>&1; then echo true; else echo false; fi; }
 
 devices_json() {
-	ids=$(agh_client_names 2>/dev/null | tr '\n' ' ')
 	first=1
 	printf '['
 	for sec in $(device_sections); do
 		id=$(uci_q get "familydns.$sec.client_id")
 		[ "$first" = 1 ] || printf ','
 		first=0
-		in_agh=false
-		case " $ids " in *" $id "*) in_agh=true ;; esac
-		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s","in_agh":%s}' \
+		printf '{"name":"%s","client_id":"%s","profile":"%s","dot_host":"%s.%s"}' \
 			"$(json_escape "$(uci_q get "familydns.$sec.name")")" "$(json_escape "$id")" \
-			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")" "$in_agh"
+			"$(json_escape "$(uci_q get "familydns.$sec.profile")")" "$(json_escape "$id")" "$(json_escape "$(domain)")"
 	done
 	printf ']'
 }
@@ -667,7 +642,7 @@ lan_json() {
 	enabled=false
 	[ "$(setting lan_dns)" = 1 ] && enabled=true
 	active=false
-	lan_redirect_present && agh_listening && active=true
+	lan_redirect_present && dns_listening && active=true
 	retired=$(awk '{printf "%s\"%s\"", sep, $1; sep = ","}' "$(retired_file)" 2>/dev/null)
 	printf '{"enabled":%s,"active":%s,"profile":"%s","retired":[%s]}' \
 		"$enabled" "$active" "$(json_escape "$(setting lan_profile || echo adult)")" "$retired"
@@ -678,11 +653,10 @@ cmd_status() {
 	ddns=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
 	ddns_ok=false
 	[ -n "$wan" ] && [ "$wan" = "$ddns" ] && ddns_ok=true
-	tls=$(agh_get /control/tls/status 2>/dev/null)
-	not_after=$(printf '%s' "$tls" | jsonfilter -e '@.not_after' 2>/dev/null)
+	not_after=$(cert_not_after)
 	days=""
 	[ -n "$not_after" ] && days=$(days_until "$not_after" "$(date +%Y-%m-%d)")
-	version=$(agh_get /control/status 2>/dev/null | jsonfilter -e '@.version' 2>/dev/null)
+	version=$(dnsdist --version 2>/dev/null | sed -n '1s/^dnsdist \([^ ]*\).*/\1/p')
 	staging=false
 	[ "$(setting staging)" = 1 ] && staging=true
 	configured=false
@@ -694,9 +668,9 @@ cmd_status() {
 		"$configured" "$(json_escape "$(domain)")" "$(json_or_null "$wan")" "$(json_or_null "$ddns")" "$ddns_ok"
 	printf '"cert":{"present":%s,"not_after":%s,"days_left":%s,"staging":%s},' \
 		"$(bool cert_present)" "$(json_or_null "$not_after")" "${days:-null}" "$staging"
-	printf '"agh":{"running":%s,"version":%s,"dot_listening":%s,"admin_url":"%s"},' \
-		"$(bool pidof AdGuardHome)" "$(json_or_null "$version")" \
-		"$(bool sh -c "netstat -ltn 2>/dev/null | grep -q ':$(dot_port) '")" "$(agh_url)"
+	printf '"dnsdist":{"running":%s,"version":%s,"dot_listening":%s},' \
+		"$(bool pidof dnsdist)" "$(json_or_null "$version")" \
+		"$(bool sh -c "netstat -ltn 2>/dev/null | grep -q ':$(dot_port) '")"
 	printf '"firewall_open":%s,"progress":' "$fw"
 	progress_json
 	printf ',"lan":'
@@ -712,21 +686,19 @@ case "$1" in
 	sync)      cmd_sync ;;
 	reconcile) cmd_reconcile ;;
 	watch)     cmd_watch ;;
-	admin)     shift; cmd_admin "$@" ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
 		cat <<EOF
 Usage: familydns <command>
 
-  status [--json]            Setup state, certificate, AdGuard Home and devices
-  bootstrap [--background]   Set up DDNS, certificate, AdGuard Home, firewall and devices
-  sync                       Apply devices and profiles to AdGuard Home now
+  status [--json]            Setup state, certificate, resolver and devices
+  bootstrap [--background]   Set up DDNS, certificate, resolver, firewall and network DNS
+  sync                       Re-render the resolver config from devices and profiles now
   reconcile                  Repair drift (cron hourly and on config change)
-  watch                      Fail open: drop the LAN DNS redirect if AdGuard Home stops (cron, every minute)
-  admin [--password]         Print the AdGuard Home admin URL and login as JSON (or just the password)
+  watch                      Fail open: drop the LAN DNS redirect if the resolver stops (cron, every minute)
   profile <id> [--lock]      Print an Apple DNS-over-TLS .mobileconfig for a device
-  teardown                   Remove what bootstrap set up (AdGuard Home itself stays)
+  teardown                   Remove what bootstrap set up (the dnsdist package stays)
 EOF
 		;;
 esac

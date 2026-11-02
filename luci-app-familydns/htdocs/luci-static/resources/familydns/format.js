@@ -3,18 +3,16 @@
 
 const CERT_WARN_DAYS = 14;
 const IDLE_POLL_MS = 30000;
-const STAGE_ORDER = [ 'ddns', 'cert', 'agh', 'firewall', 'clients', 'lan' ];
+const STAGE_ORDER = [ 'ddns', 'cert', 'dnsdist', 'firewall', 'lan' ];
 const CLIENT_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.duckdns\.org$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+$/;
 const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
 const LAN_IP_RE = new RegExp('^' + OCTET + '(?:\\.' + OCTET + '){3}(?:\\/(?:3[0-2]|[12]?\\d))?$');
-const SERVICES = {
-	tiktok: 'TikTok', youtube: 'YouTube', instagram: 'Instagram', facebook: 'Facebook',
-	snapchat: 'Snapchat', twitter: 'Twitter / X', discord: 'Discord', roblox: 'Roblox',
-	fortnite: 'Fortnite', steam: 'Steam', netflix: 'Netflix', reddit: 'Reddit',
-	whatsapp: 'WhatsApp', telegram: 'Telegram'
-};
+const HOST_RE_SRC = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*';
+const DOH_RE = new RegExp('^https://' + HOST_RE_SRC + '(?::(\\d{1,5}))?/\\S+$', 'i');
+const DOT_RE = new RegExp('^tls://' + HOST_RE_SRC + '(?::(\\d{1,5}))?$', 'i');
+const IPV4_RE = new RegExp('^' + OCTET + '(?:\\.' + OCTET + '){3}(?::(\\d{1,5}))?$');
 
 function hasOwn(obj, key) {
 	return Object.prototype.hasOwnProperty.call(obj, key);
@@ -22,8 +20,8 @@ function hasOwn(obj, key) {
 
 function stageLabel(name) {
 	const labels = {
-		ddns: _('DynDNS'), cert: _('Certificate'), agh: _('AdGuard Home'),
-		firewall: _('Firewall'), clients: _('Devices'), lan: _('Network DNS')
+		ddns: _('DynDNS'), cert: _('Certificate'), dnsdist: _('Resolver'),
+		firewall: _('Firewall'), lan: _('Network DNS')
 	};
 	return hasOwn(labels, name) ? labels[name] : name;
 }
@@ -49,8 +47,8 @@ function describeLan(lan) {
 	if (!lan || !lan.enabled)
 		return { kind: 'off', text: _('Network DNS: off') };
 	if (lan.active)
-		return { kind: 'ready', text: _('Network DNS: via AdGuard Home') };
-	return { kind: 'warning', text: _('Network DNS: waiting for AdGuard Home - using router DNS') };
+		return { kind: 'ready', text: _('Network DNS: via Family DNS') };
+	return { kind: 'warning', text: _('Network DNS: waiting for the resolver - using router DNS') };
 }
 
 function joinNames(names) {
@@ -69,16 +67,16 @@ function retiredNote(lan) {
 }
 
 function lanDnsDescription() {
-	return _('All LAN DNS, including devices with hardcoded DNS servers, is redirected to AdGuard Home. adblock and https-dns-proxy are paused while this is on.');
+	return _('All LAN DNS, including devices with hardcoded DNS servers, is redirected to Family DNS. adblock and https-dns-proxy are paused while this is on.');
 }
 
 function problemFor(status, port) {
-	const agh = status.agh || {};
+	const resolver = status.dnsdist || {};
 	const cert = status.cert || {};
-	if (!agh.running)
-		return { kind: 'error', text: _('AdGuard Home is not running') };
-	if (!agh.dot_listening)
-		return { kind: 'error', text: _('AdGuard Home is not listening for DoT') };
+	if (!resolver.running)
+		return { kind: 'error', text: _('Resolver is not running') };
+	if (!resolver.dot_listening)
+		return { kind: 'error', text: _('Resolver is not listening on DoT port') };
 	if (!status.ddns_ok)
 		return { kind: 'warning', text: _('DynDNS record does not match the WAN IP') };
 	if (!cert.present)
@@ -142,9 +140,7 @@ function describeCert(cert) {
 function describeDevice(device) {
 	if (!device)
 		return { active: false, text: _('Not applied yet') };
-	return device.in_agh
-		? { active: true, text: _('Active in AdGuard Home') }
-		: { active: false, text: _('Waiting for sync to AdGuard Home') };
+	return { active: true, text: device.dot_host };
 }
 
 function validClientId(id) {
@@ -184,7 +180,8 @@ function validLanIp(value) {
 }
 
 function validUpstream(value) {
-	return typeof value === 'string' && /^\S+$/.test(value);
+	const m = typeof value === 'string' ? (DOH_RE.exec(value) || DOT_RE.exec(value) || IPV4_RE.exec(value)) : null;
+	return !!m && (m[1] === undefined || validPort(m[1]));
 }
 
 function isDuplicate(id, others) {
@@ -203,21 +200,6 @@ function profileArgs(clientId, locked) {
 	return [ 'profile', clientId ].concat(locked ? [ '--lock' ] : []);
 }
 
-function parseAdminJson(text) {
-	let doc;
-	try {
-		doc = JSON.parse(text);
-	} catch (e) {
-		return null;
-	}
-	if (!doc || typeof doc !== 'object')
-		return null;
-	const ok = function(v) { return typeof v === 'string' && v.length > 0; };
-	if (!ok(doc.url) || !ok(doc.username) || !ok(doc.password))
-		return null;
-	return { url: doc.url, username: doc.username, password: doc.password };
-}
-
 function hasPendingChanges(changes) {
 	return !!(changes && changes.familydns && changes.familydns.length);
 }
@@ -228,19 +210,6 @@ function canBootstrap(status, dirty) {
 
 function shouldFetch(running, elapsedMs) {
 	return running || elapsedMs >= IDLE_POLL_MS;
-}
-
-function serviceLabel(id) {
-	return hasOwn(SERVICES, id) ? SERVICES[id] : id;
-}
-
-function serviceOptions(extra) {
-	const out = Object.keys(SERVICES).map(function(id) { return { id: id, label: SERVICES[id] }; });
-	[].concat(extra || []).forEach(function(id) {
-		if (id && !hasOwn(SERVICES, id) && !out.some(function(o) { return o.id === id; }))
-			out.push({ id: id, label: id });
-	});
-	return out;
 }
 
 return baseclass.extend({
@@ -265,10 +234,7 @@ return baseclass.extend({
 	dotHostname: dotHostname,
 	mobileconfigFilename: mobileconfigFilename,
 	profileArgs: profileArgs,
-	parseAdminJson: parseAdminJson,
 	hasPendingChanges: hasPendingChanges,
 	canBootstrap: canBootstrap,
-	shouldFetch: shouldFetch,
-	serviceLabel: serviceLabel,
-	serviceOptions: serviceOptions
+	shouldFetch: shouldFetch
 });

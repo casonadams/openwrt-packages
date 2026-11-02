@@ -11,7 +11,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 
 sed '/^case "\$1" in/,$d' "$PKG/root/usr/bin/familydns" > "$TEST_TMP/harness.sh"
 export FAMILYDNS_LIB="$PKG/root/usr/share/familydns/lib.sh"
-export PROGRESS_FILE="$TEST_TMP/progress" PID_FILE="$TEST_TMP/pid" STATE_DIR="$TEST_TMP/state"
+export PROGRESS_FILE="$TEST_TMP/progress" PID_FILE="$TEST_TMP/pid" STATE_DIR="$TEST_TMP/state" ACME_SSL="$TEST_TMP/acme"
 export FIXTURE="$TEST_TMP/fixture"
 
 cat > "$FIXTURE" <<'CFG'
@@ -21,18 +21,14 @@ familydns.settings.domain=example.duckdns.org
 familydns.settings.duckdns_token=secret-token
 familydns.settings.email=me@example.com
 familydns.settings.dot_port=853
+familydns.settings.lan_profile=kids
+familydns.settings.fallback=9.9.9.9
 familydns.kids=profile
 familydns.kids.name=Kids
-familydns.kids.filtering=1
-familydns.kids.safe_search=1
-familydns.kids.parental=1
-familydns.kids.safebrowsing=1
-familydns.kids.blocked_services=tiktok roblox
 familydns.kids.upstream=https://doh.cleanbrowsing.org/doh/family-filter/ tls://one.one.one.one
 familydns.adult=profile
 familydns.adult.name=Adult
-familydns.adult.filtering=1
-familydns.adult.safe_search=0
+familydns.adult.upstream=1.1.1.1:5353
 familydns.bare=profile
 familydns.bare.name=Bare
 familydns.@device[0]=device
@@ -101,31 +97,97 @@ for bad in '' 192.168.1 192.168.1.256 192.168.1.1/33 192.168.1.1/ abc 1.2.3.4.5 
 	assert_eq "invalid LAN id '$bad'" no "$(valid_lan_id "$bad" && echo yes || echo no)"
 done
 
-echo "-> absent options mean their LuCI default"
-assert_eq "ad blocking is on when the option was dropped" true "$(profile_flag bare filtering 1)"
-assert_eq "ad blocking can still be turned off" false "$(profile_flag bare filtering 1 | sed 's/true/false/')"
-assert_eq "an unset switch with default off stays off" false "$(profile_flag bare parental)"
-assert_eq "an explicit 1 is on" true "$(profile_flag kids safe_search)"
+echo "-> upstream parsing"
+parse_upstream https://doh.cleanbrowsing.org/doh/family-filter/
+assert_eq "DoH keeps host and path" "doh doh.cleanbrowsing.org 443 /doh/family-filter/" "$UP_KIND $UP_HOST $UP_PORT $UP_PATH"
+parse_upstream https://dns.example:8443
+assert_eq "DoH without a path uses /dns-query and its own port" "doh dns.example 8443 /dns-query" "$UP_KIND $UP_HOST $UP_PORT $UP_PATH"
+parse_upstream tls://one.one.one.one
+assert_eq "DoT defaults to 853" "dot one.one.one.one 853" "$UP_KIND $UP_HOST $UP_PORT"
+parse_upstream 9.9.9.9
+assert_eq "a plain IP defaults to 53" "plain 9.9.9.9 53" "$UP_KIND $UP_HOST $UP_PORT"
+parse_upstream 127.0.0.1:5353
+assert_eq "a plain IP keeps its port" "plain 127.0.0.1 5353" "$UP_KIND $UP_HOST $UP_PORT"
+for bad in '' dns.example 'tls://' tls://a:b tls://a/path https://a:0 https://a:70000 'https://a b' 300.1.1.1 1.1.1.1/24 quic://x; do
+	assert_eq "rejects upstream '$bad'" no "$(parse_upstream "$bad" && echo yes || echo no)"
+done
+parse_upstream https://doh.example/dns-query
+assert_eq "DoH server line" 'newServer({address="203.0.113.5:443", pool="kids", order=1, checkInterval=30, tls="openssl", subjectName="doh.example", validateCertificates=true, caStore="/etc/ssl/certs/ca-certificates.crt", dohPath="/dns-query"})' "$(server_lua kids 1 203.0.113.5)"
+parse_upstream tls://dot.example:8853
+quoted_pool='p"q'
+assert_eq "DoT server line has no dohPath" 'newServer({address="203.0.113.6:8853", pool="p\"q", order=2, checkInterval=30, tls="openssl", subjectName="dot.example", validateCertificates=true, caStore="/etc/ssl/certs/ca-certificates.crt"})' "$(server_lua "$quoted_pool" 2 203.0.113.6)"
+parse_upstream 1.1.1.1
+assert_eq "plain server line is a bare address" 'newServer({address="1.1.1.1:53", pool="kids", order=101, checkInterval=30})' "$(server_lua kids 101 1.1.1.1)"
+assert_eq "enddate_iso converts openssl dates" 2027-01-29T18:47:40Z "$(enddate_iso 'Jan 29 18:47:40 2027 GMT')"
+assert_eq "enddate_iso handles a space-padded day" 2026-12-09T01:02:03Z "$(enddate_iso 'Dec  9 01:02:03 2026 GMT')"
 
-echo "-> client JSON"
-kid=$(client_json '@device[0]')
-dad=$(client_json '@device[1]')
-assert_eq "kid JSON is valid even with quotes in the name" yes "$(json_ok "$kid")"
-assert_eq "name is preserved" 'Kid "One" <iPhone>' "$(json_get "$kid" name)"
-assert_eq "client id and LAN address become the AdGuard ids" '["kid1","192.168.1.50"]' "$(json_get "$kid" ids)"
-assert_eq "a device without a LAN address only has its client id" '["dad"]' "$(json_get "$dad" ids)"
-sed 's/^familydns.@device\[1\].profile=adult/familydns.@device[1].profile=bare/' "$FIXTURE" > "$FIXTURE.bare"
-with_fixture "$FIXTURE.bare" client_json '@device[1]' > "$TEST_TMP/bare.json"
-assert_eq "a profile whose filtering option was dropped still filters" true "$(json_get "$(cat "$TEST_TMP/bare.json")" filtering_enabled)"
-assert_eq "kids profile turns on safe search" true "$(json_get "$kid" safe_search.youtube)"
-assert_eq "kids profile turns on parental" true "$(json_get "$kid" parental_enabled)"
-assert_eq "kids profile blocks services" '["tiktok","roblox"]' "$(json_get "$kid" blocked_services)"
-assert_eq "kids profile stops using global blocked services" false "$(json_get "$kid" use_global_blocked_services)"
-assert_eq "kids profile carries its own upstreams" '["https://doh.cleanbrowsing.org/doh/family-filter/","tls://one.one.one.one"]' "$(json_get "$kid" upstreams)"
-assert_eq "a profile without upstreams leaves the client on the defaults" '[]' "$(json_get "$dad" upstreams)"
-assert_eq "adult profile keeps filtering" true "$(json_get "$dad" filtering_enabled)"
-assert_eq "adult profile leaves parental off" false "$(json_get "$dad" parental_enabled)"
-assert_eq "adult profile uses global blocked services" true "$(json_get "$dad" use_global_blocked_services)"
+echo "-> dnsdist config"
+mkdir -p "$ACME_SSL"
+echo cert > "$ACME_SSL/*.example.duckdns.org.fullchain.crt"
+echo key > "$ACME_SSL/*.example.duckdns.org.key"
+# shellcheck disable=SC2329
+resolveip() {
+	case "$4" in
+		doh.cleanbrowsing.org) echo 185.228.168.10 ;;
+		one.one.one.one) echo 1.1.1.1 ;;
+	esac
+}
+conf=$(render_dnsdist; echo "rc=$?")
+assert_eq "render succeeds" rc=0 "$(echo "$conf" | tail -n 1)"
+has() { printf '%s\n' "$conf" | grep -F -- "$1" >/dev/null && echo yes || echo no; }
+count() { printf '%s\n' "$conf" | grep -cF -- "$1"; }
+crt="$ACME_SSL/*.example.duckdns.org.fullchain.crt"
+tls_line="addTLSLocal(\"0.0.0.0:853\", \"$crt\""
+assert_eq "DoT listens with the wildcard cert" yes "$(has "$tls_line")"
+assert_eq "plain DNS listens on loopback and the LAN address" 2 "$(count ":5300")"
+assert_eq "kids DoH upstream is resolved and ordered first" yes "$(has 'address="185.228.168.10:443", pool="kids", order=1,')"
+assert_eq "kids DoT upstream is second" yes "$(has 'address="1.1.1.1:853", pool="kids", order=2,')"
+assert_eq "adult plain upstream keeps its port" yes "$(has 'address="1.1.1.1:5353", pool="adult", order=1,')"
+assert_eq "fallback servers come after every profile upstream" yes "$(has 'address="9.9.9.9:53", pool="kids", order=101')"
+assert_eq "an unused profile gets no pool" 0 "$(count 'pool="bare"')"
+assert_eq "per-address rate limit defaults to 500" yes "$(has 'MaxQPSIPRule(500, 32, 128)')"
+assert_eq "DoT names are matched by SNI" yes "$(has 'addAction(SNIRule("kid1.example.duckdns.org"), PoolAction("kids"))')"
+assert_eq "a device's LAN address routes to its profile" yes "$(has 'addAction(NetmaskGroupRule("192.168.1.50"), PoolAction("kids"))')"
+assert_eq "outside the LAN an unknown name is refused" yes "$(has 'SNIRule("kid1.example.duckdns.org"), SNIRule("dad.example.duckdns.org")}))}), RCodeAction(DNSRCode.REFUSED))')"
+assert_eq "local names go to dnsmasq" yes "$(has 'addAction(SuffixMatchNodeRule(localnames), PoolAction("local"))')"
+assert_eq "everything else uses the network profile" yes "$(has 'addAction(AllRule(), PoolAction("kids"))')"
+line_of() { printf '%s\n' "$conf" | grep -nF -- "$1" | head -n 1 | cut -d: -f1; }
+last=$(printf '%s\n' "$conf" | grep -v '^rc=' | tail -n 1)
+assert_eq "the default route is last" 'addAction(AllRule(), PoolAction("kids"))' "$last"
+assert_eq "the refuse rule comes before any device route" yes "$([ "$(line_of REFUSED)" -lt "$(line_of 'SNIRule("kid1.example.duckdns.org"), PoolAction')" ] && echo yes || echo no)"
+
+{ cat "$FIXTURE"; echo familydns.settings.ratelimit=0; } > "$FIXTURE.rl"
+assert_eq "rate limit 0 leaves it off" 0 "$(with_fixture "$FIXTURE.rl" render_dnsdist | grep -c MaxQPSIPRule)"
+rm "$ACME_SSL"/*.key
+assert_eq "no key means no DoT listener" 0 "$(render_dnsdist | grep -c addTLSLocal)"
+echo key > "$ACME_SSL/*.example.duckdns.org.key"
+sed '/^familydns.@device/d' "$FIXTURE" > "$FIXTURE.nodev"
+assert_eq "without devices every outside source is refused" yes "$(with_fixture "$FIXTURE.nodev" render_dnsdist | grep -F 'addAction(NotRule(NetmaskGroupRule(private)), RCodeAction(DNSRCode.REFUSED))' >/dev/null && echo yes)"
+sed 's/^familydns.@device\[1\].profile=adult/familydns.@device[1].profile=ghost/' "$FIXTURE" > "$FIXTURE.ghost"
+with_fixture "$FIXTURE.ghost" render_dnsdist >/dev/null; assert_eq "a device with a missing profile is reported" "device 'dad' uses the missing profile 'ghost'" "$MSG"
+sed 's/^familydns.settings.lan_profile=.*/familydns.settings.lan_profile=ghost/' "$FIXTURE" > "$FIXTURE.langhost"
+with_fixture "$FIXTURE.langhost" render_dnsdist >/dev/null; assert_eq "a missing network profile is reported" "network profile 'ghost' does not exist" "$MSG"
+sed 's/^familydns.@device\[0\].client_id=.*/familydns.@device[0].client_id=Bad_ID/' "$FIXTURE" > "$FIXTURE.badid"
+with_fixture "$FIXTURE.badid" render_dnsdist >/dev/null; assert_eq "an invalid client id is reported" "device 'Bad_ID' has an invalid client id" "$MSG"
+sed 's/^familydns.@device\[0\].lan_ip=.*/familydns.@device[0].lan_ip=10.0.0/' "$FIXTURE" > "$FIXTURE.badlan"
+with_fixture "$FIXTURE.badlan" render_dnsdist >/dev/null; assert_eq "an invalid LAN address is reported" "device 'kid1' has an invalid LAN address '10.0.0'" "$MSG"
+sed 's/^familydns.kids.upstream=.*/familydns.kids.upstream=/' "$FIXTURE" > "$FIXTURE.noup"
+with_fixture "$FIXTURE.noup" render_dnsdist >/dev/null; assert_eq "a profile without upstreams is reported, not hidden by the fallback" "profile 'kids' has no upstream servers" "$MSG"
+sed 's/^familydns.kids.upstream=.*/familydns.kids.upstream=quic:\/\/x/' "$FIXTURE" > "$FIXTURE.badup"
+with_fixture "$FIXTURE.badup" render_dnsdist >/dev/null; assert_eq "an invalid upstream is reported" "invalid upstream 'quic://x' for profile 'kids'" "$MSG"
+# shellcheck disable=SC2329
+resolveip() { :; }
+rm -rf "$STATE_DIR/resolved"
+sed 's/^familydns.settings.fallback=.*//' "$FIXTURE" | sed 's/^familydns.kids.upstream=.*/familydns.kids.upstream=tls:\/\/one.one.one.one/' > "$FIXTURE.dead"
+with_fixture "$FIXTURE.dead" render_dnsdist >/dev/null; assert_eq "a profile whose upstreams cannot be resolved is reported" "profile 'kids' has no reachable upstream (check the router's DNS)" "$MSG"
+# shellcheck disable=SC2329
+resolveip() { echo 1.1.1.1; }
+render_dnsdist >/dev/null
+# shellcheck disable=SC2329
+resolveip() { :; }
+assert_eq "the last good answer survives a DNS outage" 1.1.1.1 "$(resolve_upstream_ip one.one.one.one)"
+assert_eq "an IP literal is used as is" 192.0.2.9 "$(resolve_upstream_ip 192.0.2.9)"
+unset -f resolveip
 
 echo "-> Apple profile"
 MC_NAME='Kid "One" <iPhone>' MC_CLIENT_ID=kid1 MC_DOMAIN=example.duckdns.org MC_IP=203.0.113.7 MC_LOCK=0 MC_FAILOVER=1 \
@@ -156,7 +218,7 @@ assert_eq "non-duckdns domain is rejected" "domain must be a single-label <name>
 sed -i.bak 's/^familydns.settings.domain=.*/familydns.settings.domain=example.duckdns.org/' "$FIXTURE"
 assert_eq "device sections are found" '@device[0] @device[1]' "$(device_sections | tr '\n' ' ' | sed 's/ $//')"
 assert_eq "lan ip defaults to 192.168.1.1" 192.168.1.1 "$(lan_ip)"
-assert_eq "lan ip can be overridden" 127.0.0.1 "$(AGH_WEB_IP=127.0.0.1 lan_ip)"
+assert_eq "lan ip can be overridden" 127.0.0.1 "$(LAN_IP=127.0.0.1 lan_ip)"
 
 echo "-> DuckDNS update result messages"
 # shellcheck disable=SC2329
@@ -185,7 +247,7 @@ assert_eq "progress JSON is valid" yes "$(json_ok "$(progress_json)")"
 assert_eq "progress JSON carries the error message" "no certificate" "$(json_get "$(progress_json)" message)"
 for s in $STAGES; do progress_set "$s" ok ""; done
 assert_eq "all ok is ok" ok "$(progress_overall)"
-assert_eq "all six stages are listed" 6 "$(json_get "$(progress_json)" stages.length)"
-assert_eq "network DNS is the last stage" lan "$(json_get "$(progress_json)" 'stages[5].name')"
+assert_eq "all five stages are listed" 5 "$(json_get "$(progress_json)" stages.length)"
+assert_eq "network DNS is the last stage" lan "$(json_get "$(progress_json)" 'stages[4].name')"
 
 summary

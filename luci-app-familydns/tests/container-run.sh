@@ -1,33 +1,50 @@
 #!/bin/sh
 # Runs inside an OpenWrt rootfs container (see test_integration.sh). Phase is $1.
+# Upstreams are local dnsmasq instances that answer who.test with a different address each, so the
+# test can tell which upstream a query went to.
 PKG=/pkg
-export AGH_WEB_IP=127.0.0.1 AGH_DIR=/etc/adguardhome STATE_DIR=/etc/familydns
+export STATE_DIR=/etc/familydns DNSDIST_CONF=/etc/dnsdist.conf
+LAN_IP=$(ip -4 -o addr show eth0 | awk '{print $4}' | cut -d/ -f1)
+export LAN_IP
 
 load_engine() {
 	sed '/^case "\$1" in/,$d' /usr/bin/familydns > /tmp/engine.sh
 	# shellcheck source=/dev/null
 	. /tmp/engine.sh
+	# No procd in the container: run dnsdist directly where the engine would restart the service.
+	dnsdist_restart() {
+		# shellcheck disable=SC2046
+		kill $(pidof dnsdist) 2>/dev/null
+		sleep 1
+		dnsdist --supervised -C "$DNSDIST_CONF" -u dnsdist -g dnsdist >/tmp/dnsdist.log 2>&1 &
+	}
+}
+
+fake_upstream() {
+	dnsmasq --conf-file=/dev/null --port="$1" --listen-address=127.0.0.1 --bind-interfaces --no-resolv --no-hosts \
+		--address="/who.test/$2" --pid-file="/tmp/dnsmasq-$1.pid"
 }
 
 case "$1" in
 setup)
 	apk update >/dev/null 2>&1
-	apk add adguardhome openssl-util >/dev/null 2>&1 || { echo "FAIL apk add"; exit 1; }
+	apk add dnsdist openssl-util >/dev/null 2>&1 || { echo "FAIL apk add"; exit 1; }
 	cp -r "$PKG/root/." /
 	cp /usr/share/familydns/default.config /etc/config/familydns
 	uci set familydns.settings.enabled=1
 	uci set familydns.settings.domain=test.duckdns.org
 	uci set familydns.settings.duckdns_token=unused
 	uci set familydns.settings.email=ci@example.com
+	uci set familydns.settings.lan_profile=kids
 	uci -q delete familydns.kids.upstream
 	uci -q delete familydns.adult.upstream
-	uci add_list familydns.kids.upstream=1.0.0.1
+	uci add_list familydns.kids.upstream=127.0.0.1:5391
+	uci add_list familydns.adult.upstream=127.0.0.1:5392
 	uci set familydns.broken=profile
 	uci set familydns.broken.name=Broken
-	uci set familydns.broken.filtering=0
 	uci add_list familydns.broken.upstream=127.0.0.1:9
 	uci -q delete familydns.settings.fallback
-	uci add_list familydns.settings.fallback=9.9.9.9
+	uci add_list familydns.settings.fallback=127.0.0.1:5393
 	for d in "Kid One|kid1|kids" "Dad|dad|adult" "Kid Two|kid2|broken"; do
 		IFS='|' read -r n i p <<EOT
 $d
@@ -38,45 +55,27 @@ EOT
 		uci set "familydns.$s.profile=$p"
 	done
 	uci commit familydns
-	mkdir -p /etc/ssl/acme /etc/adguardhome /var/lib/adguardhome
+	fake_upstream 5391 10.0.0.1
+	fake_upstream 5392 10.0.0.2
+	fake_upstream 5393 10.0.0.3
+	dnsmasq --conf-file=/dev/null --port=53 --listen-address=127.0.0.1 --bind-interfaces --no-resolv --no-hosts \
+		--address=/router.lan/192.168.1.1 --pid-file=/tmp/dnsmasq-53.pid
+	mkdir -p /etc/ssl/acme
 	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
 		-keyout "/etc/ssl/acme/*.test.duckdns.org.key" -out "/etc/ssl/acme/*.test.duckdns.org.fullchain.crt" \
 		-subj "/CN=*.test.duckdns.org" -addext "subjectAltName=DNS:*.test.duckdns.org" >/dev/null 2>&1
 	cp "/etc/ssl/acme/*.test.duckdns.org.fullchain.crt" /tmp/ca.crt
-	AdGuardHome --no-check-update -c /etc/adguardhome/adguardhome.yaml -w /var/lib/adguardhome >/tmp/agh.log 2>&1 &
-	sleep 5
 	load_engine
-	install_cert
-	if stage_agh; then echo "OK agh: $MSG"; else echo "FAIL agh: $MSG"; tail -5 /tmp/agh.log; exit 1; fi
-	agh_post /control/dns_config '{"upstream_dns":["1.1.1.1"],"bootstrap_dns":["1.1.1.1"]}' >/dev/null
-	agh_post /control/filtering/refresh '{"whitelist":false}' >/dev/null
+	if stage_dnsdist; then echo "OK dnsdist: $MSG"; else echo "FAIL dnsdist: $MSG"; tail -5 /tmp/dnsdist.log; exit 1; fi
 	if stage_firewall; then echo "OK firewall: $MSG"; fi
-	if stage_clients; then echo "OK clients: $MSG"; else echo "FAIL clients: $MSG"; exit 1; fi
-	n=0
-	while [ "$n" -lt 45 ]; do
-		rules=$(agh_get /control/filtering/status | jsonfilter -e '@.filters[0].rules_count')
-		[ "${rules:-0}" -gt 0 ] && break
-		n=$((n + 1)); sleep 2
-	done
-	echo "OK rules: ${rules:-0}"
-	[ "${rules:-0}" -gt 0 ] || grep -i error /tmp/agh.log | tail -3 | cut -c1-300
+	sleep 3
 	;;
 lan)
 	load_engine
 	uci set familydns.settings.lan_dns=1
-	uci set familydns.settings.lan_profile=kids
-	uci -q delete familydns.kids.filtering
 	uci commit familydns
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
-	echo "filtering: $(agh_get /control/filtering/status | jsonfilter -e '@.enabled')"
-	echo "safesearch: $(agh_get /control/safesearch/status | jsonfilter -e '@.enabled')"
-	echo "parental: $(agh_get /control/parental/status | jsonfilter -e '@.enabled')"
-	echo "safebrowsing: $(agh_get /control/safebrowsing/status | jsonfilter -e '@.enabled')"
-	echo "ptr: $(agh_get /control/dns_info | jsonfilter -e '@.local_ptr_upstreams[*]' | tr '\n' ' ')"
-	echo "lan rule count: $(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | grep -c '^\[/lan/\]127.0.0.1:53$')"
 	echo "redirect: '$(uci -q get firewall.familydns_lan_dns)' to port '$(uci -q get firewall.familydns_lan_dns.dest_port)' proto '$(uci -q get firewall.familydns_lan_dns.proto)'"
-	stage_lan >/dev/null
-	echo "lan rule count after a second run: $(agh_get /control/dns_info | jsonfilter -e '@.upstream_dns[*]' | grep -c '^\[/lan/\]127.0.0.1:53$')"
 	;;
 lan-off)
 	load_engine
@@ -85,34 +84,22 @@ lan-off)
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
 	echo "redirect after off: '$(uci -q get firewall.familydns_lan_dns)'"
 	;;
-ratelimit)
-	load_engine
-	echo "ratelimit: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit') subnet4: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit_subnet_len_ipv4') subnet6: $(agh_get /control/dns_info | jsonfilter -e '@.ratelimit_subnet_len_ipv6')"
-	;;
 status) familydns status ;;
 profile) familydns profile kid1 --lock ;;
-querylog)
-	load_engine
-	agh_get '/control/querylog?limit=20' | jsonfilter -e '@.data[*].client_id' | tr '\n' ' '
-	echo
-	echo "kid1 upstream: $(agh_get '/control/querylog?limit=20&search=example.com' | jsonfilter -e '@.data[@.client_id="kid1"].upstream' | head -1)"
-	echo "kid2 upstream: $(agh_get '/control/querylog?limit=20&search=example.net' | jsonfilter -e '@.data[@.client_id="kid2"].upstream' | head -1)"
-	echo "dad upstream: $(agh_get '/control/querylog?limit=20&search=example.org' | jsonfilter -e '@.data[@.client_id="dad"].upstream' | head -1)"
-	;;
 resync)
 	load_engine
 	uci delete "familydns.@device[1]"
 	uci commit familydns
-	stage_clients
-	echo "dad client name after removal: '$(agh_client_name_for dad)'"
-	echo "kid1 client name still present: '$(agh_client_name_for kid1)'"
-	echo "managed: $(tr '\n' ' ' < /etc/familydns/managed)"
+	apply_dnsdist
+	sleep 3
+	echo "dad rule after removal: $(grep -c 'SNIRule("dad.test.duckdns.org")' "$DNSDIST_CONF")"
 	;;
 teardown)
 	load_engine
 	familydns teardown
-	echo "kid1 after teardown: '$(agh_client_name_for kid1)'"
-	echo "state dir exists: $([ -d /etc/familydns ] && echo yes || echo no)"
 	echo "firewall rule: '$(uci -q get firewall.familydns_dot)'"
+	echo "state dir exists: $([ -d /etc/familydns ] && echo yes || echo no)"
+	echo "dnsdist enabled: '$(uci -q get dnsdist.general.enabled)'"
+	echo "dnsdist config size: $(wc -c < "$DNSDIST_CONF" | tr -d ' ')"
 	;;
 esac

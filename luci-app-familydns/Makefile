@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
-LUCI_TITLE:=LuCI support for Family DNS (per-device AdGuard Home profiles over DoT)
-LUCI_DEPENDS:=+adguardhome +acme-acmesh +acme-acmesh-dnsapi +ddns-scripts
+LUCI_TITLE:=LuCI support for Family DNS (per-device DNS profiles over DoT, served by dnsdist)
+LUCI_DEPENDS:=+dnsdist +resolveip +openssl-util +acme-acmesh +acme-acmesh-dnsapi +ddns-scripts
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-familydns

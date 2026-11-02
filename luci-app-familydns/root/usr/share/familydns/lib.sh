@@ -60,6 +60,15 @@ days_until() {
 		}'
 }
 
+# enddate_iso "Jan 29 18:47:40 2027 GMT" -> 2027-01-29T18:47:40Z (the openssl -enddate format)
+enddate_iso() {
+	printf '%s\n' "$1" | awk 'BEGIN {split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", m, " ")}
+		NF >= 4 {
+			for (i = 1; i <= 12; i++) if (m[i] == $1) mo = i
+			if (mo) printf "%s-%02d-%02dT%sZ\n", $4, mo, $2, $3
+		}'
+}
+
 # valid_lan_id 192.168.1.50 | 192.168.1.0/24
 valid_lan_id() {
 	printf '%s\n' "$1" | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ {
@@ -70,41 +79,47 @@ valid_lan_id() {
 	} END {exit !ok}'
 }
 
-# profile_flag <profile> <option> [default 0|1]: LuCI drops an option that equals its form default, so an
-# absent option must mean the default (for example ad blocking is on unless explicitly set to 0).
-profile_flag() {
-	v=$(uci_q get "familydns.$1.$2")
-	[ -n "$v" ] || v=${3:-0}
-	if [ "$v" = 1 ]; then echo true; else echo false; fi
+valid_ipv4() {
+	case "$1" in */*) return 1 ;; esac
+	valid_lan_id "$1"
 }
 
-# client_json <device section>: AdGuard Home persistent-client JSON for that device
-client_json() {
-	sec=$1
-	name=$(uci_q get "familydns.$sec.name")
-	id=$(uci_q get "familydns.$sec.client_id")
-	prof=$(uci_q get "familydns.$sec.profile")
-	ss=$(profile_flag "$prof" safe_search)
-	services=""
-	for svc in $(uci_q get "familydns.$prof.blocked_services"); do
-		services="$services${services:+,}\"$(json_escape "$svc")\""
-	done
-	upstreams=""
-	for up in $(uci_q get "familydns.$prof.upstream"); do
-		upstreams="$upstreams${upstreams:+,}\"$(json_escape "$up")\""
-	done
-	use_global=true
-	[ -n "$services" ] && use_global=false
-	ids="\"$(json_escape "$id")\""
-	lan=$(uci_q get "familydns.$sec.lan_ip")
-	if [ -n "$lan" ] && valid_lan_id "$lan"; then ids="$ids,\"$(json_escape "$lan")\""; fi
-	printf '{"name":"%s","ids":[%s],"tags":[],"upstreams":[%s],' "$(json_escape "$name")" "$ids" "$upstreams"
-	printf '"filtering_enabled":%s,"parental_enabled":%s,"safebrowsing_enabled":%s,"safesearch_enabled":%s,' \
-		"$(profile_flag "$prof" filtering 1)" "$(profile_flag "$prof" parental)" "$(profile_flag "$prof" safebrowsing)" "$ss"
-	printf '"safe_search":{"enabled":%s,"bing":%s,"duckduckgo":%s,"ecosia":%s,"google":%s,"pixabay":%s,"yandex":%s,"youtube":%s},' \
-		"$ss" "$ss" "$ss" "$ss" "$ss" "$ss" "$ss" "$ss"
-	printf '"blocked_services":[%s],"use_global_blocked_services":%s,"use_global_settings":false,' "$services" "$use_global"
-	printf '"ignore_querylog":false,"ignore_statistics":false}'
+# lua_str <text>: a double-quoted Lua string literal
+lua_str() {
+	printf '"%s"' "$(json_escape "$1")"
+}
+
+# parse_upstream <upstream>: sets UP_KIND (doh|dot|plain), UP_HOST, UP_PORT and UP_PATH.
+# Accepts https://host[:port][/path] (DoH), tls://host[:port] (DoT) and a plain IPv4[:port].
+parse_upstream() {
+	UP_PATH=""
+	case "$1" in
+		https://*) UP_KIND=doh UP_PORT=443 rest=${1#https://} ;;
+		tls://*) UP_KIND=dot UP_PORT=853 rest=${1#tls://} ;;
+		*) UP_KIND=plain UP_PORT=53 rest=$1 ;;
+	esac
+	hostport=${rest%%/*}
+	if [ "$UP_KIND" = doh ]; then
+		UP_PATH=${rest#"$hostport"}
+		[ -n "$UP_PATH" ] || UP_PATH=/dns-query
+	elif [ "$hostport" != "$rest" ]; then
+		return 1
+	fi
+	UP_HOST=${hostport%%:*}
+	case "$hostport" in *:*) UP_PORT=${hostport#*:} ;; esac
+	case "$UP_HOST" in '' | *[!A-Za-z0-9.-]*) return 1 ;; esac
+	case "$UP_PORT" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$UP_PORT" -ge 1 ] && [ "$UP_PORT" -le 65535 ] || return 1
+	[ "$UP_KIND" != plain ] || valid_ipv4 "$UP_HOST"
+}
+
+# server_lua <pool> <order> <ip>: dnsdist newServer line for the upstream last read by parse_upstream
+server_lua() {
+	printf 'newServer({address=%s, pool=%s, order=%s, checkInterval=30' "$(lua_str "$3:$UP_PORT")" "$(lua_str "$1")" "$2"
+	[ "$UP_KIND" = plain ] ||
+		printf ', tls="openssl", subjectName=%s, validateCertificates=true, caStore="/etc/ssl/certs/ca-certificates.crt"' "$(lua_str "$UP_HOST")"
+	[ "$UP_KIND" != doh ] || printf ', dohPath=%s' "$(lua_str "$UP_PATH")"
+	printf '})\n'
 }
 
 # mobileconfig: Apple DNS-over-TLS profile from MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_LOCK MC_FAILOVER MC_UUID1 MC_UUID2
