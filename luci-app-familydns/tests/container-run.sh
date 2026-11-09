@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs inside an OpenWrt rootfs container (see test_integration.sh). Phase is $1.
+# Runs inside an OpenWrt rootfs container (see test_integration.sh). Phase is $1, its arguments follow.
 # Upstreams are local dnsmasq instances that answer who.test with a different address each, so the
 # test can tell which upstream a query went to.
 PKG=/pkg
@@ -78,7 +78,7 @@ lan)
 	uci set familydns.everyone.enabled=1
 	uci commit familydns
 	if stage_lan; then echo "OK lan: $MSG"; else echo "FAIL lan: $MSG"; fi
-	echo "redirect: '$(uci -q get firewall.familydns_lan_dns)' to port '$(uci -q get firewall.familydns_lan_dns.dest_port)' proto '$(uci -q get firewall.familydns_lan_dns.proto)'"
+	echo "redirect: '$(uci -q get firewall.familydns_lan_dns)' to port '$(uci -q get firewall.familydns_lan_dns.dest_port)' proto '$(uci -q get firewall.familydns_lan_dns.proto)' family '$(uci -q get firewall.familydns_lan_dns.family)'"
 	;;
 lan-off)
 	load_engine
@@ -94,6 +94,13 @@ lists)
 	fetch_blocklist && apply_dnsdist
 	echo "domains: $(wc -l < "$BLOCKLIST_FILE" | tr -d ' ')"
 	sleep 2
+	;;
+log) familydns log ;;
+list-set)
+	load_engine
+	touch "$STATE_DIR/configured"
+	cmd_lists "$2" "$3"
+	sleep 3
 	;;
 resync)
 	load_engine

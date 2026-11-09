@@ -95,7 +95,7 @@ check('dot is invalid', fmt.validClientId('kid.1'), false);
 check('empty is invalid', fmt.validClientId(''), false);
 check('undefined is invalid', fmt.validClientId(undefined), false);
 const seq = function(list) { let i = 0; return function() { return list[i++]; }; };
-check('device id is the name slug plus a short suffix', fmt.deviceId('Landon\'s iPad', [], seq(['1a2b'])), 'landon-s-ipad-1a2b');
+check('device id is the name slug plus a short suffix', fmt.deviceId('Kid\'s iPad', [], seq(['1a2b'])), 'kid-s-ipad-1a2b');
 check('device id is a valid client id', fmt.validClientId(fmt.deviceId('Kid 1 iPhone', [])), true);
 check('device id suffix is random hex by default', /^kid-[0-9a-f]{4}$/.test(fmt.deviceId('Kid', [])), true);
 check('device id retries when the suffix is taken', fmt.deviceId('Kid', [ 'kid-aaaa' ], seq(['aaaa', 'bbbb'])), 'kid-bbbb');
@@ -183,6 +183,32 @@ check('negative query count is an en dash', fmt.formatQueries(-1), '–');
 check('NaN query count is an en dash', fmt.formatQueries(NaN), '–');
 check('fractional query count is an en dash', fmt.formatQueries(1.5), '–');
 check('query count note explains restarts', /restarts?/.test(fmt.queryCountDescription()), true);
+check('blocked share is a percentage of queries', fmt.blockedShare(200, 30), '15.0%');
+check('blocked share rounds to one decimal', fmt.blockedShare(3, 1), '33.3%');
+check('nothing blocked is 0%', fmt.blockedShare(10, 0), '0.0%');
+check('no queries has no share', fmt.blockedShare(0, 0), '–');
+check('unknown counts have no share', fmt.blockedShare(null, 5), '–');
+check('more blocked than queries has no share', fmt.blockedShare(5, 6), '–');
+
+console.log('-> query log');
+const sampleLog = { now: 100, devices: {
+	'dev:kid1': [ [ 90, 'ads.example.com', 1, 3 ], [ 80, 'apple.com', 28, 0 ], [ 70, 'ads.example.com', 28, 3 ], [ 60, 'apple.com', 1, 0 ] ],
+	'default': [ [ 95, 'tv.example.net', 1, 3 ] ]
+} };
+check('one row per domain, most recent first', fmt.summarizeLog(sampleLog, 'kid1', false).map(function(r) { return r.name; }), [ 'ads.example.com', 'apple.com' ]);
+check('a row counts every answer and lists its query types', fmt.summarizeLog(sampleLog, 'kid1', false)[1], { name: 'apple.com', types: [ 'AAAA', 'A' ], count: 2, last: 80, blocked: false });
+check('NXDOMAIN answers are blocked', fmt.summarizeLog(sampleLog, 'kid1', false)[0].blocked, true);
+check('blocked only drops answered names', fmt.summarizeLog(sampleLog, 'kid1', true).map(function(r) { return r.name; }), [ 'ads.example.com' ]);
+check('the network row reads the default sender', fmt.summarizeLog(sampleLog, 'default', false)[0].name, 'tv.example.net');
+check('a device without answers has an empty log', fmt.summarizeLog(sampleLog, 'dad', false), []);
+check('a missing log is empty', fmt.summarizeLog(null, 'kid1', false), []);
+check('the latest answer decides the status', fmt.summarizeLog({ devices: { 'dev:x': [ [ 9, 'a.test', 1, 0 ], [ 8, 'a.test', 1, 3 ] ] } }, 'x', false)[0].blocked, false);
+check('common query types are named', [ 1, 28, 65, 12 ].map(fmt.qtypeName), [ 'A', 'AAAA', 'HTTPS', 'PTR' ]);
+check('unknown query types keep their number', fmt.qtypeName(99), 'TYPE99');
+check('age in seconds', fmt.ageText(95, 100), '5s ago');
+check('age in minutes', fmt.ageText(100, 250), '2m ago');
+check('age in hours', fmt.ageText(0, 7200), '2h ago');
+check('clock skew is not negative', fmt.ageText(105, 100), '0s ago');
 
 console.log('-> hostnames and profile commands');
 check('dot hostname', fmt.dotHostname('kid1', 'example.duckdns.org'), 'kid1.example.duckdns.org');
