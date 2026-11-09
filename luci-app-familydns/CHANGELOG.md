@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v2.1.0...luci-app-familydns-v2.2.0) (2026-11-09)
+
+
+### Features
+
+* **familydns:** generated iPhone profiles fail closed by default ([6185cdf](https://github.com/casonadams/openwrt-packages/commit/6185cdf808680b59cb8997301af710313b272444))
+* **familydns:** query log per device with Never block / Always block ([6185cdf](https://github.com/casonadams/openwrt-packages/commit/6185cdf808680b59cb8997301af710313b272444))
+
+
+### Bug Fixes
+
+* **familydns:** IPv6 DNS on the LAN bypassed filtering ([6185cdf](https://github.com/casonadams/openwrt-packages/commit/6185cdf808680b59cb8997301af710313b272444))
+* **familydns:** Save & Apply on the page deleted every device ([6185cdf](https://github.com/casonadams/openwrt-packages/commit/6185cdf808680b59cb8997301af710313b272444))
+
 ## [2.1.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v2.0.0...luci-app-familydns-v2.1.0) (2026-11-02)
 
 
