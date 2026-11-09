@@ -16,6 +16,11 @@ PID_FILE="${PID_FILE:-/tmp/familydns.pid}"
 LOCK_DIR="${LOCK_DIR:-/tmp/familydns.lock}"
 DNS_PORT="${DNS_PORT:-5300}"
 WEB_PORT="${WEB_PORT:-8083}"
+QLOG_DIR="${QLOG_DIR:-/tmp/familydns-qlog}"
+QLOG_REQ="$QLOG_DIR/request"
+QLOG_OUT="$QLOG_DIR/answers"
+QLOG_TRIES="${QLOG_TRIES:-5}"
+QLOG_SIZE=500
 STAGES="ddns cert dnsdist firewall lan"
 UPSTREAM_DNS="1.1.1.1"
 
@@ -419,31 +424,18 @@ list_sum() {
 	[ "$BLOCKLIST_FILE_ON" = 1 ] && md5sum "$BLOCKLIST_FILE" 2>/dev/null | cut -d' ' -f1
 }
 
-emit_blocklist() {
-	printf 'local blocklistFile = %s\n' "$(lua_str "$BLOCKLIST_FILE")"
-	echo 'local allowed = {}'
-	echo 'local blocked = {}'
-	for d in $(custom_domains allow); do
-		printf 'allowed[%s] = true\n' "$(lua_str "$d")"
-	done
-	for d in $(custom_domains block); do
-		printf 'blocked[%s] = true\n' "$(lua_str "$d")"
-	done
+# emit_ffi: FFI declarations and queryName for the blocklist and the query log (declared once: LuaJIT
+# rejects redefinitions)
+emit_ffi() {
 	cat <<'LUA'
 local ffi = require("ffi")
 ffi.cdef[[
 typedef struct dnsdist_ffi_dnsquestion_t dnsdist_ffi_dnsquestion_t;
 void dnsdist_ffi_dnsquestion_get_qname_raw(const dnsdist_ffi_dnsquestion_t* dq, const char** qname, size_t* qnameSize);
+uint16_t dnsdist_ffi_dnsquestion_get_qtype(const dnsdist_ffi_dnsquestion_t* dq);
+uint8_t dnsdist_ffi_dnsquestion_get_rcode(const dnsdist_ffi_dnsquestion_t* dq);
+const char* dnsdist_ffi_dnsquestion_get_tag(const dnsdist_ffi_dnsquestion_t* dq, const char* label);
 ]]
-LUA
-	if [ "$BLOCKLIST_FILE_ON" = 1 ]; then
-		cat <<'LUA'
-for line in io.lines(blocklistFile) do blocked[line] = true end
-collectgarbage()
-LUA
-	fi
-	cat <<'LUA'
-
 local qptr, qlen = ffi.new("const char*[1]"), ffi.new("size_t[1]")
 local function queryName(dq)
   ffi.C.dnsdist_ffi_dnsquestion_get_qname_raw(dq, qptr, qlen)
@@ -456,6 +448,26 @@ local function queryName(dq)
   end
   return table.concat(labels, "."):lower()
 end
+LUA
+}
+
+emit_blocklist() {
+	printf 'local blocklistFile = %s\n' "$(lua_str "$BLOCKLIST_FILE")"
+	echo 'local allowed = {}'
+	echo 'local blocked = {}'
+	for d in $(custom_domains allow); do
+		printf 'allowed[%s] = true\n' "$(lua_str "$d")"
+	done
+	for d in $(custom_domains block); do
+		printf 'blocked[%s] = true\n' "$(lua_str "$d")"
+	done
+	if [ "$BLOCKLIST_FILE_ON" = 1 ]; then
+		cat <<'LUA'
+for line in io.lines(blocklistFile) do blocked[line] = true end
+collectgarbage()
+LUA
+	fi
+	cat <<'LUA'
 local function listed(set, name)
   while name do
     if set[name] then return true end
@@ -468,6 +480,55 @@ end
 local function isBlocked(dq)
   local name = queryName(dq)
   return listed(blocked, name) and not listed(allowed, name)
+end
+LUA
+}
+
+# emit_qlog: keep each sender's last QLOG_SIZE answers in memory; maintenance() (run by dnsdist every second)
+# writes them as JSON to QLOG_OUT when QLOG_REQ holds a token it has not answered yet (see cmd_log).
+emit_qlog() {
+	printf 'local qlogSize, qlogReq, qlogOut = %s, %s, %s\n' "$QLOG_SIZE" "$(lua_str "$QLOG_REQ")" "$(lua_str "$QLOG_OUT")"
+	cat <<'LUA'
+local qlog, qlogSeen = {}, nil
+-- The FFI response struct starts with the same DNSQuestion pointer as the query struct (dnsdist 2.0.11).
+local function logAnswer(dr)
+  local dq = ffi.cast("const dnsdist_ffi_dnsquestion_t*", dr)
+  local who = ffi.C.dnsdist_ffi_dnsquestion_get_tag(dq, "who")
+  if who ~= nil then
+    who = ffi.string(who)
+    local ring = qlog[who]
+    if not ring then ring = { n = 0 }; qlog[who] = ring end
+    ring.n = ring.n % qlogSize + 1
+    ring[ring.n] = { os.time(), queryName(dq), ffi.C.dnsdist_ffi_dnsquestion_get_qtype(dq), ffi.C.dnsdist_ffi_dnsquestion_get_rcode(dq) }
+  end
+  return DNSResponseAction.None, ""
+end
+addResponseAction(AllRule(), LuaFFIResponseAction(logAnswer), {name="qlog"})
+addCacheHitResponseAction(AllRule(), LuaFFIResponseAction(logAnswer), {name="qlog"})
+addSelfAnsweredResponseAction(AllRule(), LuaFFIResponseAction(logAnswer), {name="qlog"})
+local function jsonStr(s)
+  return '"' .. s:gsub('[%z\1-\31"\\\127-\255]', function(c) return string.format("\\u%04x", c:byte()) end) .. '"'
+end
+function maintenance()
+  local f = io.open(qlogReq, "r")
+  if not f then return end
+  local token = f:read("*l")
+  f:close()
+  if not token or token == qlogSeen then return end
+  qlogSeen = token
+  local parts = {}
+  for who, ring in pairs(qlog) do
+    local items = {}
+    for k = 0, qlogSize - 1 do
+      local e = ring[(ring.n - 1 - k) % qlogSize + 1]
+      if e then items[#items + 1] = string.format("[%d,%s,%d,%d]", e[1], jsonStr(e[2]), e[3], e[4]) end
+    end
+    parts[#parts + 1] = jsonStr(who) .. ":[" .. table.concat(items, ",") .. "]"
+  end
+  local out = io.open(qlogOut .. ".tmp", "w")
+  out:write(token, "\n", string.format('{"now":%d,"devices":{', os.time()), table.concat(parts, ","), "}}\n")
+  out:close()
+  os.rename(qlogOut .. ".tmp", qlogOut)
 end
 LUA
 }
@@ -523,6 +584,8 @@ emit_routes() {
 		printf 'addAction(TagRule("who", %s), PoolAction(%s))\n' "$(lua_str "dev:$(uci_q get "familydns.$sec.client_id")")" "$(lua_str "$(uci_q get "familydns.$sec.profile")")"
 	done
 	printf 'addAction(TagRule("who", "default"), PoolAction(%s))\n' "$(lua_str "$(lan_profile)")"
+	# Before the NXDOMAIN counters: their AllowResponseAction ends response-rule processing.
+	emit_qlog
 	for sec in $(device_sections); do
 		emit_nx "dev:$(uci_q get "familydns.$sec.client_id")"
 	done
@@ -542,6 +605,7 @@ render_dnsdist() {
 	printf 'setWebserverConfig({apiKey=%s, acl="127.0.0.1/32"})\n' "$(lua_str "$(api_key)")"
 	printf 'addLocal(%s)\n' "$(lua_str "127.0.0.1:$DNS_PORT")"
 	printf 'addLocal(%s)\n' "$(lua_str "$(lan_ip):$DNS_PORT")"
+	printf 'addLocal(%s)\n' "$(lua_str "[::]:$DNS_PORT")"
 	if cert_present; then
 		printf 'addTLSLocal(%s, %s, %s, {minTLSVersion="tls1.2"})\n' \
 			"$(lua_str "0.0.0.0:$(dot_port)")" "$(lua_str "$(cert_file fullchain.crt)")" "$(lua_str "$(cert_file key)")"
@@ -551,8 +615,9 @@ render_dnsdist() {
 	blocklist_ready && BLOCKLIST_FILE_ON=1
 	if [ "$BLOCKLIST_FILE_ON" = 1 ] || [ -n "$(custom_domains block)" ]; then
 		BLOCKLIST_ON=1
-		emit_blocklist
 	fi
+	emit_ffi
+	[ "$BLOCKLIST_ON" = 0 ] || emit_blocklist
 	for p in $PROFILES; do emit_pool "$p" || return 1; done
 	emit_routes
 }
@@ -594,9 +659,17 @@ restart_dnsdist() {
 	wait_for dnsdist_settled 20 || { MSG="dnsdist did not start; see: logread -e dnsdist"; return 1; }
 }
 
+# qlog_dir: the query log exchange directory, private to dnsdist's user (/tmp does not survive a reboot)
+qlog_dir() {
+	mkdir -p "$QLOG_DIR"
+	chown dnsdist:dnsdist "$QLOG_DIR" 2>/dev/null
+	chmod 700 "$QLOG_DIR"
+}
+
 # apply_dnsdist: render, validate, and restart dnsdist only when the config or the certificate changed
 apply_dnsdist() {
 	mkdir -p "$STATE_DIR"
+	qlog_dir
 	new="$DNSDIST_CONF.new"
 	render_dnsdist > "$new" || { rm -f "$new"; return 1; }
 	if ! err=$(dnsdist --check-config -C "$new" 2>&1); then
@@ -657,6 +730,7 @@ lan_redirect_on() {
 	set_opt firewall.familydns_lan_dns.name FamilyDNS-LAN-DNS
 	set_opt firewall.familydns_lan_dns.src lan
 	set_opt firewall.familydns_lan_dns.proto "tcp udp"
+	set_opt firewall.familydns_lan_dns.family any
 	set_opt firewall.familydns_lan_dns.src_dport 53
 	set_opt firewall.familydns_lan_dns.dest_port "$DNS_PORT"
 	set_opt firewall.familydns_lan_dns.target DNAT
@@ -745,8 +819,40 @@ cmd_lists() {
 			apply_dnsdist || { echo "$MSG" >&2; return 1; }
 			echo "updated"
 			;;
-		*) echo "usage: familydns lists update" >&2; return 1 ;;
+		allow|block)
+			other=block
+			[ "$1" = block ] && other=allow
+			d=$(printf '%s\n' "$2" | normalize_blocklist)
+			case "$d" in '' | *"
+"*) echo "not a domain: '$2'" >&2; return 1 ;; esac
+			uci_q del_list "familydns.settings.$other=$d"
+			case " $(setting "$1") " in *" $d "*) ;; *) uci_q add_list "familydns.settings.$1=$d" ;; esac
+			uci_q commit familydns
+			if [ -e "$STATE_DIR/configured" ]; then
+				apply_dnsdist || { echo "$MSG" >&2; return 1; }
+			fi
+			echo "$1ed $d"
+			;;
+		*) echo "usage: familydns lists update | allow <domain> | block <domain>" >&2; return 1 ;;
 	esac
+}
+
+# cmd_log: recent answers per sender as JSON, written by dnsdist's maintenance hook (emit_qlog) on request
+cmd_log() {
+	qlog_dir
+	token="$(date +%s)-$$"
+	echo "$token" > "$QLOG_REQ"
+	n=0
+	while [ "$n" -lt "$QLOG_TRIES" ]; do
+		sleep 1
+		if [ "$(head -n 1 "$QLOG_OUT" 2>/dev/null)" = "$token" ]; then
+			sed 1d "$QLOG_OUT"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+	echo "the resolver did not answer" >&2
+	return 1
 }
 
 cmd_migrate() {
@@ -772,8 +878,8 @@ cmd_profile() {
 		MC_CLIENT_ID=$id
 		MC_DOMAIN=$(domain)
 		MC_IP=$(cat /var/run/ddns/familydns.ip 2>/dev/null)
-		MC_FAILOVER=1
-		[ "$(setting allow_failover)" = 0 ] && MC_FAILOVER=0
+		MC_FAILOVER=0
+		[ "$(setting allow_failover)" = 1 ] && MC_FAILOVER=1
 		MC_UUID1=$(new_uuid)
 		MC_UUID2=$(new_uuid)
 		export MC_NAME MC_CLIENT_ID MC_DOMAIN MC_IP MC_FAILOVER MC_UUID1 MC_UUID2
@@ -934,6 +1040,7 @@ case "$1" in
 	watch)     cmd_watch ;;
 	migrate)   cmd_migrate ;;
 	lists)     shift; cmd_lists "$@" ;;
+	log)       cmd_log ;;
 	profile)   shift; cmd_profile "$@" ;;
 	teardown)  cmd_teardown ;;
 	*)
@@ -945,6 +1052,8 @@ Usage: familydns <command>
   sync                       Re-render the resolver config from devices and profiles now
   reconcile                  Repair drift (cron hourly and on config change)
   lists update               Download the ad-blocking list again and apply it (cron, daily)
+  lists allow|block <domain> Add a domain to Never block / Always block (and drop it from the other) and apply it
+  log                        Recent answers per device as JSON (time, name, type, rcode), newest first
   migrate                    Bring an older config up to date (runs on upgrade)
   watch                      Fail open: drop the LAN DNS redirect if the resolver stops (cron, every minute)
   profile <id>               Print an Apple DNS-over-TLS .mobileconfig for a device

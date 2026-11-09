@@ -143,6 +143,82 @@ function showInstallModal(view, clientId) {
 	]);
 }
 
+// Allow/block from the log commits the list and restarts the resolver at once, then reloads so the
+// page's list fields show it; refused while the page has unsaved changes the reload would discard.
+function changeList(which, domain) {
+	return uci.changes().then(function(changes) {
+		if (fmt.hasPendingChanges(changes))
+			throw new Error(_('Save & Apply your changes first.'));
+		return callExec(ENGINE, [ 'lists', which, domain ]);
+	}).then(function(res) {
+		if (res.code !== 0)
+			throw commandError(res);
+		window.location.reload();
+	}).catch(notifyError);
+}
+
+function logTable(log, id, onlyBlocked) {
+	const rows = fmt.summarizeLog(log, id, onlyBlocked);
+	if (!rows.length)
+		return E('p', {}, onlyBlocked ? _('Nothing blocked in the recent answers.') : _('No recent answers.'));
+	return E('table', { 'class': 'table' }, [
+		E('tr', { 'class': 'tr table-titles' }, [ _('Domain'), _('Type'), _('Count'), _('Last'), _('Answer'), '' ].map(function(t) {
+			return E('th', { 'class': 'th' }, t);
+		}))
+	].concat(rows.map(function(r) {
+		return E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td', 'style': 'word-break:break-all;' }, r.name),
+			E('td', { 'class': 'td' }, r.types.join(' ')),
+			E('td', { 'class': 'td' }, String(r.count)),
+			E('td', { 'class': 'td' }, fmt.ageText(r.last, log.now)),
+			E('td', { 'class': 'td' }, r.blocked ? _('Blocked') : _('Resolved')),
+			E('td', { 'class': 'td' }, E('button', {
+				'class': 'btn cbi-button ' + (r.blocked ? 'cbi-button-positive' : 'cbi-button-negative'),
+				'click': ui.createHandlerFn(null, changeList, r.blocked ? 'allow' : 'block', r.name)
+			}, r.blocked ? _('Never block') : _('Always block')))
+		]);
+	})));
+}
+
+function showCountsModal(name, id, queries, blocked, onlyBlocked) {
+	let log = null;
+	const list = E('div', { 'style': 'max-height:50vh;overflow:auto;margin:8px 0;' }, E('p', {}, E('em', {}, _('Loading recent answers...'))));
+	const allBtn = E('button', { 'class': 'btn cbi-button' }, _('All queries'));
+	const blockedBtn = E('button', { 'class': 'btn cbi-button' }, _('Blocked only'));
+	const paint = function() {
+		allBtn.classList.toggle('cbi-button-action', !onlyBlocked);
+		blockedBtn.classList.toggle('cbi-button-action', onlyBlocked);
+		if (log)
+			dom.content(list, logTable(log, id, onlyBlocked));
+	};
+	allBtn.addEventListener('click', function() { onlyBlocked = false; paint(); });
+	blockedBtn.addEventListener('click', function() { onlyBlocked = true; paint(); });
+	ui.showModal(name, [
+		E('table', { 'class': 'table' }, [
+			E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td left' }, _('Queries')), E('td', { 'class': 'td left' }, fmt.formatQueries(queries)) ]),
+			E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td left' }, _('Blocked')), E('td', { 'class': 'td left' }, fmt.formatQueries(blocked)) ]),
+			E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td left' }, _('Share blocked')), E('td', { 'class': 'td left' }, fmt.blockedShare(queries, blocked)) ])
+		]),
+		E('div', {}, [ allBtn, ' ', blockedBtn ]),
+		list,
+		E('p', { 'class': 'cbi-section-descr' }, _('Up to the last 500 answers per device since the resolver started, one row per domain. Never block and Always block apply at once and restart the resolver, which starts the counters and this list over.')),
+		E('p', { 'class': 'cbi-section-descr' }, [ E('strong', {}, _('Queries') + ': '), fmt.queryCountDescription() ]),
+		E('p', { 'class': 'cbi-section-descr' }, [ E('strong', {}, _('Blocked') + ': '), fmt.blockedCountDescription() ]),
+		E('div', { 'class': 'right' }, [
+			E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close'))
+		])
+	]);
+	paint();
+	callExec(ENGINE, [ 'log' ]).then(function(res) {
+		if (res.code !== 0)
+			throw commandError(res);
+		log = JSON.parse(res.stdout);
+		paint();
+	}).catch(function(err) {
+		dom.content(list, E('p', {}, _('Could not read the recent answers: %s').format(err.message || err)));
+	});
+}
+
 return view.extend({
 	// Stock handleSave stages the changes; only flag blank-row pruning for this save, because
 	// the table's Add button also saves the map and must not discard the new blank row.
@@ -369,9 +445,9 @@ return view.extend({
 			};
 
 			o = s.taboption('advanced', form.Flag, 'allow_failover', _('Let iPhones fall back to the network DNS'));
-			o.default = '1';
+			o.default = '0';
 			o.rmempty = false;
-			o.description = _('Generated profiles set AllowFailover (iOS 26 and later): if this router is unreachable the iPhone uses the network\'s own DNS instead of losing name resolution. That fallback is the network\'s own resolver, not Family DNS.');
+			o.description = _('Off by default. When on, generated profiles set AllowFailover (iOS 26 and later): iOS can send queries to the network\'s own DNS (for example the cell carrier), unfiltered, and in practice does so even while this router is up. Reinstall a device\'s profile after changing this.');
 
 			o = s.taboption('advanced', form.DynamicList, 'fallback', _('Fallback DNS servers'));
 			o.rmempty = true;
@@ -484,16 +560,16 @@ return view.extend({
 			s.addbtntitle = _('Add device');
 			s.modaltitle = _('Device');
 
-			// Rows added with "Add" but left blank are dropped on a user-initiated Save.
+			// Drop rows never saved with a name on a user-initiated Save. Skip modal-only options: LuCI removes
+			// options it cannot find on the page, and the modal parses its own copy.
 			s.parse = function() {
-				const nameField = this.children.find(function(c) { return c.option === 'name'; });
 				const tasks = [];
 				this.cfgsections().forEach(function(sid) {
-					if (sid !== DEFAULT_SEC && !nameField.formvalue(sid)) {
+					if (sid !== DEFAULT_SEC && !this.map.data.get('familydns', sid, 'name')) {
 						if (self.pruneBlank) this.map.data.remove('familydns', sid);
 						return;
 					}
-					this.children.forEach(function(c) { tasks.push(c.parse(sid)); });
+					this.children.forEach(function(c) { if (!c.modalonly) tasks.push(c.parse(sid)); });
 				}, this);
 				return Promise.all(tasks);
 			};
@@ -517,6 +593,12 @@ return view.extend({
 				}, _('Install profile')), box.firstChild);
 				return td;
 			};
+			const rowName = function(section_id) {
+				if (section_id === DEFAULT_SEC)
+					return uci.get('familydns', section_id, 'name') || _('Everyone else');
+				const clientId = uci.get('familydns', section_id, 'client_id') || '';
+				return uci.get('familydns', section_id, 'name') || clientId || _('Unnamed device');
+			};
 
 			o = s.option(form.DummyValue, '_device', _('Device'));
 			o.modalonly = false;
@@ -524,12 +606,11 @@ return view.extend({
 				if (section_id === DEFAULT_SEC) {
 					const stateLine = E('div', { 'style': MUTED + 'font-weight:600;', 'data-familydns-default': '' });
 					paintDefaultState(stateLine);
-					return E('div', {}, [ E('strong', {}, uci.get('familydns', section_id, 'name') || _('Everyone else')), stateLine ]);
+					return E('div', {}, [ E('strong', {}, rowName(section_id)), stateLine ]);
 				}
 				const clientId = uci.get('familydns', section_id, 'client_id') || '';
-				const name = uci.get('familydns', section_id, 'name') || clientId || _('Unnamed device');
 				return E('div', {}, [
-					E('strong', {}, name),
+					E('strong', {}, rowName(section_id)),
 					E('div', { 'style': MUTED + 'word-break:break-all;' }, fmt.dotHostname(clientId, domain()) || _('Not saved yet'))
 				]);
 			};
@@ -540,27 +621,28 @@ return view.extend({
 				return E('span', {}, profileLabel(uci.get('familydns', section_id, 'profile')));
 			};
 
-			o = s.option(form.DummyValue, '_queries', _('Queries'));
-			o.modalonly = false;
-			o.textvalue = function(section_id) {
-				const el = E('span', {
-					'data-familydns-queries': section_id === DEFAULT_SEC ? 'default' : (uci.get('familydns', section_id, 'client_id') || ''),
-					'title': fmt.queryCountDescription()
+			const countCell = function(section_id, field) {
+				const id = section_id === DEFAULT_SEC ? 'default' : (uci.get('familydns', section_id, 'client_id') || '');
+				const el = E('a', {
+					'href': '#',
+					['data-familydns-' + field]: id,
+					'title': _('Show details'),
+					'click': function(ev) {
+						ev.preventDefault();
+						showCountsModal(rowName(section_id), id, countFor(id, 'queries'), countFor(id, 'blocked'), field === 'blocked');
+					}
 				});
 				paintCount(el);
 				return el;
 			};
 
+			o = s.option(form.DummyValue, '_queries', _('Queries'));
+			o.modalonly = false;
+			o.textvalue = function(section_id) { return countCell(section_id, 'queries'); };
+
 			o = s.option(form.DummyValue, '_blocked', _('Blocked'));
 			o.modalonly = false;
-			o.textvalue = function(section_id) {
-				const el = E('span', {
-					'data-familydns-blocked': section_id === DEFAULT_SEC ? 'default' : (uci.get('familydns', section_id, 'client_id') || ''),
-					'title': fmt.blockedCountDescription()
-				});
-				paintCount(el);
-				return el;
-			};
+			o.textvalue = function(section_id) { return countCell(section_id, 'blocked'); };
 
 			// One field names the device. Its DNS address is generated from the name once, when the
 			// device is first saved, and never changes after that, so renaming keeps the phone working.

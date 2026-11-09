@@ -146,6 +146,46 @@ function formatQueries(n) {
 	return validCount(n) ? n.toLocaleString() : '–';
 }
 
+function blockedShare(queries, blocked) {
+	if (!validCount(queries) || !validCount(blocked) || queries === 0 || blocked > queries)
+		return '–';
+	return (blocked / queries * 100).toFixed(1) + '%';
+}
+
+const QTYPES = { 1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 12: 'PTR', 15: 'MX', 16: 'TXT', 28: 'AAAA', 33: 'SRV', 64: 'SVCB', 65: 'HTTPS' };
+
+function qtypeName(n) {
+	return QTYPES[n] || ('TYPE' + n);
+}
+
+// One row per domain from a sender's answers (newest first), as returned by `familydns log`.
+function summarizeLog(log, id, onlyBlocked) {
+	const tag = id === 'default' ? 'default' : 'dev:' + id;
+	const entries = (log && log.devices && log.devices[tag]) || [];
+	const rows = {};
+	const order = [];
+	entries.forEach(function(e) {
+		const blocked = e[3] === 3;
+		let row = rows[e[1]];
+		if (!row) {
+			row = rows[e[1]] = { name: e[1], types: [], count: 0, last: e[0], blocked: blocked };
+			order.push(row);
+		}
+		row.count++;
+		const type = qtypeName(e[2]);
+		if (row.types.indexOf(type) < 0)
+			row.types.push(type);
+	});
+	return onlyBlocked ? order.filter(function(r) { return r.blocked; }) : order;
+}
+
+function ageText(then, now) {
+	const s = Math.max(0, now - then);
+	if (s < 60) return _('%ds ago').format(s);
+	if (s < 3600) return _('%dm ago').format(Math.floor(s / 60));
+	return _('%dh ago').format(Math.floor(s / 3600));
+}
+
 function blockedCountDescription() {
 	return _('Answers saying the name does not exist: sites blocked by the ad-blocking list or the profile\'s filter, plus the odd mistyped name. Counters restart whenever the resolver restarts.');
 }
@@ -349,6 +389,10 @@ return baseclass.extend({
 	describeCert: describeCert,
 	describeAddress: describeAddress,
 	formatQueries: formatQueries,
+	blockedShare: blockedShare,
+	qtypeName: qtypeName,
+	summarizeLog: summarizeLog,
+	ageText: ageText,
 	queryCountDescription: queryCountDescription,
 	blockedCountDescription: blockedCountDescription,
 	BLOCKLIST_HELP_URL: BLOCKLIST_HELP_URL,

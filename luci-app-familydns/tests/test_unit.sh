@@ -143,7 +143,8 @@ count() { printf '%s\n' "$conf" | grep -cF -- "$1"; }
 crt="$ACME_SSL/*.example.duckdns.org.fullchain.crt"
 tls_line="addTLSLocal(\"0.0.0.0:853\", \"$crt\""
 assert_eq "DoT listens with the wildcard cert" yes "$(has "$tls_line")"
-assert_eq "plain DNS listens on loopback and the LAN address" 2 "$(count ":5300")"
+assert_eq "plain DNS listens on loopback, the LAN address and IPv6" 3 "$(count ":5300")"
+assert_eq "plain DNS listens on IPv6 for redirected IPv6 queries" yes "$(has 'addLocal("[::]:5300")')"
 assert_eq "kids DoH upstream is resolved and ordered first" yes "$(has 'address="185.228.168.10:443", pool="kids", order=1,')"
 assert_eq "kids DoT upstream is second" yes "$(has 'address="1.1.1.1:853", pool="kids", order=2,')"
 assert_eq "adult plain upstream keeps its port" yes "$(has 'address="1.1.1.1:5353", pool="adult", order=1,')"
@@ -260,6 +261,8 @@ assert_eq "the query name is read through FFI" yes "$(has 'LuaFFIRule(isBlocked)
 assert_eq "each sender gets a block rule" 3 "$(count 'RCodeAction(DNSRCode.NXDOMAIN), {name="block:')"
 assert_eq "the default sender is blocked too" yes "$(has '{name="block:default"}')"
 assert_eq "blocking comes after tagging and before routing" yes "$([ "$(line_of 'SetTagAction("who", "default")')" -lt "$(line_of 'LuaFFIRule(isBlocked)')" ] && [ "$(line_of 'LuaFFIRule(isBlocked)')" -lt "$(line_of 'TagRule("who", "dev:kid1"), PoolAction')" ] && echo yes || echo no)"
+assert_eq "FFI is declared once with the list on" 1 "$(count 'ffi.cdef')"
+assert_eq "the query log runs before the NXDOMAIN counters end response rules" yes "$([ "$(line_of '{name="qlog"}')" -lt "$(line_of '{name="nx:')" ] && echo yes || echo no)"
 assert_eq "the list checksum tracks the file" "$(md5sum "$BLOCKLIST_FILE" 2>/dev/null | cut -d' ' -f1 || md5 -q "$BLOCKLIST_FILE")" "$(BLOCKLIST_FILE_ON=1 list_sum || true)"
 assert_eq "no checksum without blocking" "" "$(BLOCKLIST_ON=0 list_sum)"
 # shellcheck disable=SC2329
@@ -276,6 +279,8 @@ assert_eq "a failed download keeps the old list" "$(cat "$TEST_TMP/good.txt")" "
 unset -f wget
 conf=$(render_dnsdist; echo "rc=$?")
 assert_eq "off renders no blocklist" 0 "$(count 'isBlocked')"
+assert_eq "FFI is declared once with the list off" 1 "$(count 'ffi.cdef')"
+assert_eq "upstream, cached and router-made answers are all logged" 3 "$(count 'LuaFFIResponseAction(logAnswer)')"
 { cat "$FIXTURE"; echo familydns.settings.block=ads.test; } > "$FIXTURE.ownonly"
 conf=$(with_fixture "$FIXTURE.ownonly" render_dnsdist; echo "rc=$?")
 assert_eq "own blocked domains work without any downloaded list" yes "$(has 'blocked["ads.test"] = true')"
@@ -342,6 +347,9 @@ assert_eq "failover is allowed when asked" yes "$(grep -q '<key>AllowFailover</k
 assert_eq "failover is omitted when off" no "$(grep -q AllowFailover "$TEST_TMP/nofailover.mobileconfig" && echo yes || echo no)"
 assert_eq "the profile can always be removed" 0 "$(grep -c -E 'ProhibitDisablement|PayloadRemovalDisallowed' "$TEST_TMP/open.mobileconfig")"
 assert_eq "no ServerAddresses when the IP is unknown" no "$(grep -q ServerAddresses "$TEST_TMP/nofailover.mobileconfig" && echo yes || echo no)"
+assert_eq "profiles fail closed when the failover setting is absent" no "$(cmd_profile kid1 | grep -q AllowFailover && echo yes || echo no)"
+printf 'familydns.settings.allow_failover=1\n' | cat - "$FIXTURE" > "$FIXTURE.failover"
+assert_eq "profiles allow failover when it is switched on" yes "$(with_fixture "$FIXTURE.failover" cmd_profile kid1 | grep -q '<key>AllowFailover</key><true/>' && echo yes || echo no)"
 
 echo "-> settings and devices"
 assert_eq "valid settings pass" ok "$(validate_settings && echo ok)"
@@ -384,5 +392,42 @@ for s in $STAGES; do progress_set "$s" ok ""; done
 assert_eq "all ok is ok" ok "$(progress_overall)"
 assert_eq "all five stages are listed" 5 "$(json_get "$(progress_json)" stages.length)"
 assert_eq "network DNS is the last stage" lan "$(json_get "$(progress_json)" 'stages[4].name')"
+
+echo "-> query log"
+QLOG_DIR="$TEST_TMP/qlog"; QLOG_REQ="$QLOG_DIR/request"; QLOG_OUT="$QLOG_DIR/answers"
+snapshot='{"now":5,"devices":{"dev:kid1":[[4,"ads.example.com",1,3]]}}'
+(
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		t=$(cat "$QLOG_REQ" 2>/dev/null)
+		[ -n "$t" ] && { printf '%s\n%s\n' "$t" "$snapshot" > "$QLOG_OUT"; break; }
+		sleep 0.2
+	done
+) &
+assert_eq "the log is the resolver's answer to this request" "$snapshot" "$(cmd_log)"
+wait
+printf 'old-token\n%s\n' "$snapshot" > "$QLOG_OUT"
+assert_eq "a stale snapshot is never returned" "rc=1" "$(export QLOG_TRIES=1; cmd_log 2>/dev/null; echo "rc=$?")"
+
+echo "-> allow and block from the log"
+printf 'familydns.settings.allow=ads.example.com\n' > "$FIXTURE.lists"
+: > "$UCI_LOG"
+# shellcheck disable=SC2329
+uci_q() {
+	case "$1" in
+		get) awk -v k="$2" 'index($0, k "=") == 1 {print substr($0, length(k) + 2); exit}' "$FIXTURE.lists" ;;
+		*) echo "$*" >> "$UCI_LOG" ;;
+	esac
+}
+cmd_lists block ADS.Example.com >/dev/null
+assert_eq "blocking takes the domain out of Never block and adds it to Always block" \
+	"del_list familydns.settings.allow=ads.example.com|add_list familydns.settings.block=ads.example.com|commit familydns" \
+	"$(tr '\n' '|' < "$UCI_LOG" | sed 's/|$//')"
+: > "$UCI_LOG"
+printf 'familydns.settings.allow=ads.example.com\n' > "$FIXTURE.lists"
+cmd_lists allow ads.example.com >/dev/null
+assert_eq "a domain already listed is not added twice" 0 "$(grep -c add_list "$UCI_LOG")"
+: > "$UCI_LOG"
+assert_eq "a non-domain is rejected" "rc=1" "$(cmd_lists block 'not a domain' 2>/dev/null; echo "rc=$?")"
+assert_eq "nothing is written for a non-domain" 0 "$(wc -l < "$UCI_LOG" | tr -d ' ')"
 
 summary

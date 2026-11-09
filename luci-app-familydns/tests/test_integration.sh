@@ -19,7 +19,14 @@ cleanup() {
 trap cleanup EXIT
 
 in_container() {
-	docker exec -e LIST_URL="http://host.docker.internal:$LIST_PORT/list.txt" "$NAME" sh /pkg/tests/container-run.sh "$1"
+	docker exec -e LIST_URL="http://host.docker.internal:$LIST_PORT/list.txt" "$NAME" sh /pkg/tests/container-run.sh "$@"
+}
+
+# logged <tag> <name> <rcode>: whether the query log has that answer for that sender
+logged() {
+	printf '%s' "$LOG" | python3 -c 'import json, sys
+d = json.load(sys.stdin)["devices"].get(sys.argv[1], [])
+print("yes" if any(e[1] == sys.argv[2] and e[3] == int(sys.argv[3]) for e in d) else "no")' "$1" "$2" "$3"
 }
 
 dot() {
@@ -61,10 +68,19 @@ assert_eq "a domain the admin blocks is blocked although the upstream resolves i
 assert_eq "its subdomains are blocked" "" "$(dot kid1 a.blockme.test)"
 assert_eq "an unrelated domain the upstream resolves is untouched" 10.0.0.7 "$(dot kid1 free.test)"
 
+echo "-> Query log"
+LOG=$(in_container log)
+assert_eq "a domain blocked by the list is logged as NXDOMAIN" yes "$(logged dev:kid1 blockedad.test 3)"
+assert_eq "a domain the profile filter blocks upstream is logged as NXDOMAIN" yes "$(logged dev:kid1 blocked.test 3)"
+assert_eq "a resolved domain is logged as NOERROR" yes "$(logged dev:kid1 who.test 0)"
+assert_eq "each device has its own log" no "$(logged dev:dad blockedad.test 3)"
+assert_eq "unknown senders are logged under the network profile" yes "$(logged default tracker.test 3)"
+assert_eq "newest answers come first" free.test "$(printf '%s' "$LOG" | python3 -c 'import json, sys; print(json.load(sys.stdin)["devices"]["dev:kid1"][0][1])')"
+
 echo "-> Network-wide DNS through dnsdist"
 lan=$(in_container lan)
 assert_eq "lan stage succeeds" yes "$(echo "$lan" | grep -q '^OK lan: network DNS goes through the resolver' && echo yes)"
-assert_eq "all LAN DNS is redirected to dnsdist" "redirect: 'redirect' to port '5300' proto 'tcp udp'" "$(echo "$lan" | grep '^redirect:')"
+assert_eq "all LAN DNS, IPv4 and IPv6, is redirected to dnsdist" "redirect: 'redirect' to port '5300' proto 'tcp udp' family 'any'" "$(echo "$lan" | grep '^redirect:')"
 
 echo "-> Status and profile"
 status=$(in_container status)
@@ -97,6 +113,12 @@ lists=$(in_container lists)
 assert_eq "an updated list is applied" "domains: 3" "$(echo "$lists" | grep '^domains')"
 assert_eq "a newly listed domain is blocked after the update" "" "$(dot kid1 newlyadded.test)"
 assert_eq "other names still resolve after the restart" 10.0.0.1 "$(dot kid1 who.test)"
+
+echo "-> Allow and block from the log"
+in_container list-set block free.test >/dev/null
+assert_eq "a domain blocked from the log is blocked" "" "$(dot kid1 free.test)"
+in_container list-set allow free.test >/dev/null
+assert_eq "allowing it again resolves it" 10.0.0.7 "$(dot kid1 free.test)"
 
 echo "-> Turning network DNS off, removing a device, tearing down"
 off=$(in_container lan-off)
