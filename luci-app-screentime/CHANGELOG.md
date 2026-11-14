@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.3.0...luci-app-screentime-v1.4.0) (2026-11-14)
+
+
+### Features
+
+* **luci-app-screentime:** per-schedule downtime overrides ([a8acf23](https://github.com/casonadams/openwrt-packages/commit/a8acf23ce3943603abfc05d94f19ddab751a52d4))
+
 ## [1.3.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-screentime-v1.2.1...luci-app-screentime-v1.3.0) (2026-11-02)
 
 
