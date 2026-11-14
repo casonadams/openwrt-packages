@@ -46,23 +46,29 @@ check('weekends from list', fmt.formatDays(['sun', 'sat']), 'Weekends');
 check('arbitrary days are ordered', fmt.formatDays('sat fri'), 'Fri, Sat');
 check('legacy list form with all', fmt.normalizeDays(['all']).length, 7);
 
-console.log('-> engine state banner');
+console.log('-> schedule rows');
 const NOW = Date.UTC(2026, 9, 31, 16, 14, 58) / 1000; // Sat 10:14 in UTC-6
 const OFFSET = -6 * 3600;
-const base = { now: NOW, enabled: 1, in_window: 0, override: { mode: 'none', seconds_left: 0 },
-	next_window_change_at: NOW + 7 * 3600 + 45 * 60 + 2, devices: [] };
-check('downtime shows next opening', fmt.describeState(base, OFFSET),
-	{ kind: 'blocked', text: 'Downtime – next window opens 6:00 PM' });
-check('inside window shows close time', fmt.describeState(Object.assign({}, base, { in_window: 1 }), OFFSET).kind, 'allowed');
-check('ignore override is amber and states the end', fmt.describeState(Object.assign({}, base,
-	{ override: { mode: 'ignore', seconds_left: 3600 } }), OFFSET),
-	{ kind: 'override', text: 'Downtime ignored until 11:14 AM' });
-check('forced override', fmt.describeState(Object.assign({}, base, { in_window: 1,
-	override: { mode: 'forced', seconds_left: 1800 } }), OFFSET).text, 'Downtime forced until 10:44 AM');
-check('master switch off', fmt.describeState(Object.assign({}, base, { enabled: 0 }), OFFSET).kind, 'off');
-check('no schedules explains the permanent block', fmt.describeState(Object.assign({}, base,
-	{ next_window_change_at: null }), OFFSET).text, 'Downtime – no schedule is active, devices stay blocked');
-check('change on another day names the weekday', fmt.formatChange(base.next_window_change_at + 24 * 3600, NOW, OFFSET), 'Sun 6:00 PM');
+const OPENS = NOW + 7 * 3600 + 45 * 60 + 2;
+const base = { now: NOW, enabled: 1, schedules: [], devices: [] };
+const sched = function(fields) {
+	return Object.assign({ id: 'sched_1', name: '', open: false, override: 'none', change_at: OPENS }, fields);
+};
+check('downtime offers to ignore it', fmt.describeSchedule(sched({}), base, OFFSET), {
+	kind: 'blocked', text: 'Downtime until 6:00 PM',
+	action: { label: 'Ignore Downtime', command: 'ignore-downtime', style: 'cbi-button-positive' }
+});
+check('open window offers to turn on downtime', fmt.describeSchedule(sched({ open: true, change_at: NOW + 3600 }), base, OFFSET), {
+	kind: 'allowed', text: 'Open until 11:14 AM',
+	action: { label: 'Turn On Downtime', command: 'turn-on-downtime', style: 'cbi-button-negative' }
+});
+check('ignored downtime is amber and offers to resume', fmt.describeSchedule(sched({ open: true, override: 'ignore' }), base, OFFSET), {
+	kind: 'override', text: 'Open until 6:00 PM (override)',
+	action: { label: 'Resume Schedule', command: 'clear-override', style: 'cbi-button-action' }
+});
+check('forced downtime offers to resume', fmt.describeSchedule(sched({ override: 'forced' }), base, OFFSET).action.command, 'clear-override');
+check('schedule that never changes has no end time', fmt.describeSchedule(sched({ open: true, change_at: null }), base, OFFSET).text, 'Open');
+check('change on another day names the weekday', fmt.formatChange(OPENS + 24 * 3600, NOW, OFFSET), 'Sun 6:00 PM');
 
 console.log('-> device rows');
 check('unknown device', fmt.describeDevice(undefined, base, OFFSET), { allowed: null, text: '–' });

@@ -24,6 +24,7 @@ cat > "$TEST_TMP/fixture" <<'EOF'
 screentime.settings=settings
 screentime.settings.enabled='1'
 screentime.schedule_a=schedule
+screentime.schedule_a.name='Evening'
 screentime.schedule_a.enabled='1'
 screentime.schedule_a.weekdays='mon' 'tue' 'wed' 'thu' 'sun'
 screentime.schedule_a.start_time='18:00:00'
@@ -33,11 +34,11 @@ screentime.@schedule[1]=schedule
 screentime.@schedule[1].weekdays='fri sat'
 screentime.@schedule[1].start_time='6:00 PM'
 screentime.@schedule[1].duration='240'
-screentime.@schedule[2]=schedule
-screentime.@schedule[2].weekdays='sun'
-screentime.@schedule[2].start_time='23:00:00'
-screentime.@schedule[2].duration='120'
-screentime.@schedule[2].devices='00:00:5e:00:53:02'
+screentime.late=schedule
+screentime.late.weekdays='sun'
+screentime.late.start_time='23:00:00'
+screentime.late.duration='120'
+screentime.late.devices='00:00:5e:00:53:02'
 screentime.@schedule[3]=schedule
 screentime.@schedule[3].enabled='0'
 screentime.@schedule[3].start_time='00:00:00'
@@ -100,8 +101,8 @@ at mon 17 0
 assert_eq "Blocked device: window opens in 1h" 3600 "$(load_state; decide lines | awk -F'|' -v m=$TV '$2 == m {print $5}')"
 at mon 18 30
 assert_eq "Allowed device: window closes in 2h" 7200 "$(load_state; decide lines | awk -F'|' -v m=$TV '$2 == m {print $5}')"
-at mon 17 0; unset OVR_MODE
-assert_eq "Global next change matches" 3600 "$(load_state; decide lines | awk -F'|' '$1 == "G" {print $4}')"
+at mon 17 0
+assert_eq "Schedule next change matches" "0|3600|3600" "$(load_state; decide lines | awk -F'|' '$2 == "schedule_a" {print $3 "|" $5 "|" $6}')"
 
 echo "-> Master switch and no schedules"
 cp "$TEST_TMP/fixture" "$TEST_TMP/fixture.orig"
@@ -109,7 +110,7 @@ sed "s/settings.enabled='1'/settings.enabled='0'/" "$TEST_TMP/fixture.orig" > "$
 at sat 10 0; assert_eq "master switch off allows everything" allowed "$(state $TV)"
 grep -v 'schedule' "$TEST_TMP/fixture.orig" | sed "s/'0'/'1'/" > "$TEST_TMP/fixture"
 at mon 18 30; assert_eq "no schedules blocks 24/7" blocked "$(state $TV)"
-assert_eq "no schedules: no next change" -1 "$(load_state; decide lines | awk -F'|' '$1 == "G" {print $4}')"
+assert_eq "no schedules: no next change" -1 "$(load_state; decide lines | awk -F'|' -v m=$TV '$2 == m {print $5}')"
 cp "$TEST_TMP/fixture.orig" "$TEST_TMP/fixture"
 
 echo "-> JSON output"
@@ -119,33 +120,51 @@ decide_json > "$TEST_TMP/status.json"
 node -e '
 const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 const tv = s.devices.find(d => d.mac === "00:00:5e:00:53:01");
-const ok = s.in_window === 1 && s.override.mode === "none" && tv.allowed === true
-	&& tv.name === "Living Room TV" && tv.change_at === s.now + 7200 && s.devices.length === 2;
+const a = s.schedules.find(x => x.id === "schedule_a");
+const ok = s.enabled === 1 && tv.allowed === true && tv.name === "Living Room TV"
+	&& tv.change_at === s.now + 7200 && s.devices.length === 2 && s.schedules.length === 3
+	&& a.name === "Evening" && a.open === true && a.override === "none" && a.change_at === s.now + 7200;
 process.exit(ok ? 0 : 1);
 ' "$TEST_TMP/status.json"
 assert_eq "status --json is valid and consistent" 0 "$?"
 
-echo "-> Override lifecycle"
-rm -f "$OVERRIDE_FILE"
-at sat 10 0
-set_override ignore >/dev/null
-assert_eq "ignore stored with expiry at next window open (Sat 18:00)" "ignore $((1800000000 + 18 * 3600))" "$(cat "$OVERRIDE_FILE")"
-assert_eq "ignore allows a device in downtime" allowed "$(state $TV)"
-at sat 17 59; assert_eq "ignore still active a minute before the window" allowed "$(state $TV)"
-at sat 18 0; read_override "$((1800000000 + 18 * 3600))"
-assert_eq "ignore expires exactly at window open" none "$OVR_MODE"
-assert_eq "expired override file is removed" no "$([ -f "$OVERRIDE_FILE" ] && echo yes || echo no)"
-at sat 19 0; assert_eq "schedule resumes after expiry" allowed "$(state $TV)"
-at sat 20 0
-set_override forced >/dev/null
-assert_eq "forced stored with expiry at window close (Sat 22:00)" "forced $((1800000000 + 22 * 3600))" "$(cat "$OVERRIDE_FILE")"
-assert_eq "forced blocks a device inside a window" blocked "$(state $TV)"
-echo "bogus 123" > "$OVERRIDE_FILE"
-at sat 20 0; read_override "$((1800000000 + 20 * 3600))"
-assert_eq "unknown override mode is rejected" none "$OVR_MODE"
-echo "ignore soon" > "$OVERRIDE_FILE"
-read_override "$((1800000000 + 20 * 3600))"
-assert_eq "non-numeric expiry is rejected" none "$OVR_MODE"
+echo "-> Per-schedule overrides"
+field() { load_state; decide lines | awk -F'|' -v k="$1" -v n="$2" '$2 == k {print $n}'; }
+fails() { { ( "$@" ) >/dev/null; } 2>&1; }
+echo "ignore 1900000000" > "$OVERRIDE_FILE"
+at sun 12 0
+assert_eq "pre-upgrade global override line is ignored" blocked "$(state $TV)"
+set_override ignore late >/dev/null
+assert_eq "ignore lasts until this schedule opens (Sun 23:00), not the next window of any schedule" \
+	"late ignore $((1800000000 + 23 * 3600))" "$(cat "$OVERRIDE_FILE")"
+assert_eq "ignore allows the schedule's device" allowed "$(state $TABLET)"
+assert_eq "ignore leaves devices of other schedules blocked" blocked "$(state $TV)"
+assert_eq "ignored schedule reports its override" "1|ignore" "$(field late 3)|$(field late 4)"
+assert_eq "overridden device is reported as override" override "$(field $TABLET 4)"
+assert_eq "device stays allowed through both windows until 01:00" $((13 * 3600)) "$(field $TABLET 5)"
+at sun 22 59; assert_eq "ignore still active a minute before the window" allowed "$(state $TABLET)"
+at sun 23 0;  assert_eq "ignore expires exactly at window open" none "$(field late 4)"
+at sun 19 0
+set_override forced evening >/dev/null
+assert_eq "schedule found by name; both overrides kept" "late schedule_a" "$(cut -d' ' -f1 "$OVERRIDE_FILE" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "forced lasts until the window closes (Sun 20:30)" "$((1800000000 + 20 * 3600 + 30 * 60))" "$(awk '$1 == "schedule_a" {print $3}' "$OVERRIDE_FILE")"
+assert_eq "forced blocks devices only that schedule covers" blocked "$(state $TV)"
+assert_eq "a device another open schedule covers stays allowed" allowed "$(state $TABLET)"
+clear_override late >/dev/null
+assert_eq "resume drops only that schedule's override" schedule_a "$(cut -d' ' -f1 "$OVERRIDE_FILE")"
+assert_eq "resumed schedule follows its windows again" blocked "$(state $TABLET)"
+at sun 20 30; assert_eq "forced ends when the window closes" none "$(field schedule_a 4)"
+clear_override >/dev/null
+assert_eq "resume without a schedule removes every override" no "$([ -f "$OVERRIDE_FILE" ] && echo yes || echo no)"
+at sun 23 30
+assert_eq "ignoring an open schedule is refused" "Error: schedule 'late' is already open" "$(fails set_override ignore late)"
+assert_eq "forcing a closed schedule is refused" "Error: schedule 'Evening' is already in downtime" "$(fails set_override forced Evening)"
+assert_eq "anonymous schedule is refused" "Error: schedule '@schedule[1]' has no section name; name it with 'uci rename' first" \
+	"$(fails set_override ignore '@schedule[1]')"
+assert_eq "disabled schedule is refused" "Error: no enabled schedule '@schedule[3]'" "$(fails clear_override '@schedule[3]')"
+assert_eq "refused commands write nothing" no "$([ -f "$OVERRIDE_FILE" ] && echo yes || echo no)"
+printf 'late bogus 1900000000\nlate ignore soon\nnope ignore 1900000000\n' > "$OVERRIDE_FILE"
+at sun 12 0; assert_eq "malformed and unknown-schedule lines are ignored" blocked "$(state $TABLET)"
 rm -f "$OVERRIDE_FILE"
 
 echo "-> Reconcile (nft set and flow teardown)"

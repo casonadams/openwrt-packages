@@ -164,23 +164,11 @@ const DeviceTargets = form.MultiValue.extend({
 	}
 });
 
-function badge(text, kind) {
-	const colors = {
-		allowed: 'var(--success-color-high)',
-		blocked: 'var(--error-color-high)',
-		override: 'var(--warning-color-high)',
-		off: 'var(--border-color-medium)'
-	};
-	return E('span', {
-		'class': 'ifacebadge',
-		'style': 'display:inline-flex;align-items:center;padding:4px 10px;font-size:12px;font-weight:600;'
-	}, [
-		E('span', {
-			'style': 'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:' + colors[kind]
-		}),
-		text
-	]);
-}
+const STATUS_COLORS = {
+	allowed: 'var(--success-color-high)',
+	blocked: 'var(--error-color-high)',
+	override: 'var(--warn-color-high)'
+};
 
 return view.extend({
 	// Stock handleSave stages the changes; only flag blank-row pruning for this save.
@@ -212,20 +200,14 @@ return view.extend({
 			'style': 'margin-bottom:16px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;'
 		});
 
-		const runAction = function(cmd, btn) {
+		const runAction = function(cmd, sid, btn) {
 			btn.disabled = true;
-			return callExec(ENGINE, [cmd]).then(refresh).catch(function(err) {
+			return callExec(ENGINE, [cmd, sid]).then(function(res) {
+				if (res.code) throw new Error((res.stderr || '').trim() || _('exit code %d').format(res.code));
+			}).then(refresh).catch(function(err) {
 				ui.addNotification(null, E('p', _('Operation failed: %s').format(err.message || err)));
 				btn.disabled = false;
 			});
-		};
-
-		const actionButton = function() {
-			if (state.override.mode !== 'none')
-				return [ _('Resume Schedule'), 'clear-override', 'cbi-button-action' ];
-			if (state.in_window)
-				return [ _('Turn On Downtime Now'), 'turn-on-downtime', 'cbi-button-negative' ];
-			return [ _('Ignore Downtime Until Next Window'), 'ignore-downtime', 'cbi-button-negative' ];
 		};
 
 		const paintHeader = function() {
@@ -233,20 +215,34 @@ return view.extend({
 				dom.content(header, E('em', _('Could not read the Screen Time status from the router.')));
 				return;
 			}
-			const desc = fmt.describeState(state, localOffset);
-			const act = actionButton();
-			const btn = E('button', { 'type': 'button', 'class': 'btn cbi-button important ' + act[2] }, act[0]);
-			btn.addEventListener('click', function() { runAction(act[1], btn); });
 			const clock = new Date((state.now + localOffset) * 1000).toLocaleTimeString('en-US', {
 				timeZone: 'UTC', hour: 'numeric', minute: '2-digit'
 			});
 			dom.content(header, [
-				btn,
-				E('div', { 'style': 'display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
-					badge(desc.text, desc.kind),
-					E('span', { 'class': 'ifacebadge', 'style': 'padding:4px 10px;font-size:12px;opacity:0.85;' },
-						clock + ' (' + tzName + ')')
-				])
+				state.enabled ? E([]) : E('span', { 'class': 'ifacebadge', 'style': 'padding:4px 10px;font-size:12px;font-weight:600;' },
+					_('Screen Time is off – all devices are allowed')),
+				E('span', { 'class': 'ifacebadge', 'style': 'padding:4px 10px;font-size:12px;opacity:0.85;' },
+					clock + ' (' + tzName + ')')
+			]);
+		};
+
+		const paintSchedule = function(el) {
+			const sid = el.getAttribute('data-screentime-schedule');
+			const sched = state && state.enabled && state.schedules.find(function(s) { return s.id === sid; });
+			if (!sched) {
+				dom.content(el, '');
+				return;
+			}
+			const desc = fmt.describeSchedule(sched, state, localOffset);
+			const btn = E('button', {
+				'type': 'button',
+				'class': 'btn cbi-button ' + desc.action.style,
+				'style': 'white-space:normal;word-break:normal;height:auto;line-height:1.3;padding:5px 14px;'
+			}, desc.action.label);
+			btn.addEventListener('click', function() { runAction(desc.action.command, sid, btn); });
+			dom.content(el, [
+				E('span', { 'style': 'font-weight:600;color:' + STATUS_COLORS[desc.kind] }, desc.text),
+				btn
 			]);
 		};
 
@@ -254,11 +250,12 @@ return view.extend({
 			const mac = el.getAttribute('data-screentime-mac');
 			const dev = state && state.devices.find(function(d) { return d.mac === mac; });
 			const desc = fmt.describeDevice(dev, state, localOffset);
-			el.style.color = desc.allowed == null ? '' : (desc.allowed ? 'var(--success-color-high)' : 'var(--error-color-high)');
+			el.style.color = desc.allowed == null ? '' : STATUS_COLORS[desc.allowed ? 'allowed' : 'blocked'];
 			el.textContent = desc.text;
 		};
 
-		const paintDevices = function() {
+		const paintRows = function() {
+			document.querySelectorAll('[data-screentime-schedule]').forEach(paintSchedule);
 			document.querySelectorAll('[data-screentime-mac]').forEach(paintDevice);
 		};
 
@@ -266,7 +263,7 @@ return view.extend({
 			return fetchState().then(function(next) {
 				state = next;
 				paintHeader();
-				paintDevices();
+				paintRows();
 			});
 		};
 
@@ -275,7 +272,7 @@ return view.extend({
 		m = new form.Map('screentime', _('Screen Time'),
 			_('Devices listed under Managed Devices have network access only during the scheduled windows below.'));
 
-		// 1. State banner and override button
+		// 1. State banner
 		s = m.section(form.NamedSection, 'settings', 'settings');
 		s.render = function() {
 			paintHeader();
@@ -290,6 +287,15 @@ return view.extend({
 		s.addremove = true;
 		s.sortable = true;
 		s.modaltitle = _('Screen Time Schedule');
+
+		// Overrides are keyed by section name; anonymous section names change when rows move.
+		s.handleAdd = function(ev) {
+			let name;
+			do {
+				name = 'sched_' + Math.random().toString(16).slice(2, 10);
+			} while (uci.get('screentime', name));
+			return form.GridSection.prototype.handleAdd.call(this, ev, name);
+		};
 
 		o = s.option(form.Flag, 'enabled', _('Enable'));
 		o.default = o.enabled;
@@ -307,7 +313,12 @@ return view.extend({
 			children.push(' ');
 			children.push(E('span', { 'style': 'opacity:0.75;font-size:12px;' },
 				'(' + fmt.formatDays(get('weekdays', 'all')) + ')'));
-			return E('div', { 'style': 'line-height:1.4;' }, children);
+			const status = E('div', {
+				'data-screentime-schedule': section_id,
+				'style': 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;'
+			});
+			paintSchedule(status);
+			return E('div', { 'style': 'line-height:1.4;' }, children.concat(status));
 		};
 
 		o = s.option(form.DummyValue, '_devices_summary', _('Applies To'));

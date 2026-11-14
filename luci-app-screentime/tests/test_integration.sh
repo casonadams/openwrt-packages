@@ -67,6 +67,15 @@ at fri 19 0;  assert_eq "list weekdays + 12h time, window open" allowed "$(state
 at fri 17 0;  assert_eq "list weekdays, before window" blocked "$(state $TV)"
 at sat 10 0;  assert_eq "anonymous device is managed" blocked "$(state $TABLET)"
 
+echo "-> Per-schedule override (busybox awk, real uci)"
+at mon 12 0
+set_override ignore evening >/dev/null
+assert_eq "ignore stored for the named schedule until it opens" "evening ignore $((1800000000 + 18 * 3600))" "$(cat "$OVERRIDE_FILE")"
+assert_eq "ignored schedule allows its devices" allowed "$(state $TV)"
+assert_eq "anonymous schedule is refused" 1 "$( (set_override ignore '@schedule[1]') >/dev/null 2>&1; echo $?)"
+clear_override evening >/dev/null
+assert_eq "resume returns to the schedule" blocked "$(state $TV)"
+
 echo "-> Real nft"
 at mon 17 0
 reconcile

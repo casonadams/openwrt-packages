@@ -2,10 +2,11 @@
 #
 # stdin : `uci show screentime`
 # vars  : fmt=lines|json  dow=mon..sun  sec=seconds since local midnight
-#         epoch=now (unix)  ovr=none|ignore|forced  left=override seconds remaining
+#         epoch=now (unix)  ovrfile=override file, lines of "<schedule> <ignore|forced> <until epoch>"
 #
 # lines output:
-#   G|<enabled>|<in_window>|<secs to next global window change or -1>
+#   G|<enabled>
+#   S|<schedule>|<open 0/1>|<override none|ignore|forced>|<secs to next change or -1>|<secs to next scheduled change or -1>|<name>
 #   D|<mac>|<allowed 0/1>|<reason>|<secs to next change or -1>|<name>
 #
 # A window belongs to its start day; windows crossing midnight spill into the next day.
@@ -36,31 +37,48 @@ function sched_hit(s, d, m) {
 	return DOK[s, (d + 6) % 7] && m + 1440 < START[s] + DUR[s]
 }
 
-# mac == "" asks "is any window open", otherwise "is mac covered by an open window"
-function open_at(mac, t,   abs, d, m, i, s) {
+function sched_at(s, t,   abs) {
 	abs = nowmin + t
-	d = (nowday + int(abs / 1440)) % 7
-	m = abs % 1440
+	return sched_hit(s, (nowday + int(abs / 1440)) % 7, abs % 1440)
+}
+
+# An override replaces its schedule's state until it expires.
+function sched_open(s, t) {
+	if ((s in OVR) && t * 60 < OVRLEFT[s]) return OVR[s] == "ignore"
+	return sched_at(s, t)
+}
+
+# kind: "sched"/"raw" = schedule key with/without its override,
+#       "dev"/"devraw" = is mac key covered by an open schedule, with/without overrides
+function state_at(kind, key, t,   i, s) {
+	if (kind == "sched") return sched_open(key, t)
+	if (kind == "raw") return sched_at(key, t)
 	for (i = 1; i <= ns; i++) {
 		s = SCHED[i]
-		if (sched_hit(s, d, m) && (mac == "" || ALLDEV[s] || (s, mac) in DEVSET)) return 1
+		if ((ALLDEV[s] || (s, key) in DEVSET) && (kind == "dev" ? sched_open(s, t) : sched_at(s, t))) return 1
 	}
 	return 0
 }
 
-# The open/closed state only changes at a window start or end, so test just those minutes
-# over the next 8 days instead of every minute.
-function secs_to_change(mac,   cur, i, k, d, c, t, best) {
-	cur = open_at(mac, 0)
+# State only changes at a window start or end or when an override expires, so test just
+# those minutes over the next 8 days instead of every minute.
+function secs_to_change(kind, key,   cur, i, k, d, c, t, best, s) {
+	cur = state_at(kind, key, 0)
 	best = -1
-	for (i = 1; i <= ns; i++)
+	for (i = 1; i <= ns; i++) {
+		s = SCHED[i]
+		if (kind != "raw" && (s in OVR)) {
+			t = int((OVRLEFT[s] + 59) / 60)
+			if (t >= 1 && (best < 0 || t < best) && state_at(kind, key, t) != cur) best = t
+		}
 		for (k = 0; k < 2; k++) {
-			c = (START[SCHED[i]] + k * DUR[SCHED[i]]) % 1440
+			c = (START[s] + k * DUR[s]) % 1440
 			for (d = 0; d <= 8; d++) {
 				t = d * 1440 + c - nowmin
-				if (t >= 1 && (best < 0 || t < best) && open_at(mac, t) != cur) best = t
+				if (t >= 1 && (best < 0 || t < best) && state_at(kind, key, t) != cur) best = t
 			}
 		}
+	}
 	return best < 0 ? -1 : best * 60 - sec % 60
 }
 
@@ -112,34 +130,52 @@ END {
 		for (j = 1; j <= nt; j++) DEVSET[s, tl[j]] = 1
 	}
 
+	while (ovrfile != "" && (getline line < ovrfile) > 0) {
+		if (split(line, f, " ") != 3 || !(f[1] in START) || (f[2] != "ignore" && f[2] != "forced") || f[3] !~ /^[0-9]+$/) continue
+		left = f[3] - (epoch - sec % 60)
+		if (left > 0) { OVR[f[1]] = f[2]; OVRLEFT[f[1]] = left }
+	}
+
 	enabled = (opt["settings", "enabled"] != "0")
-	in_win = open_at("", 0)
-	g_next = secs_to_change("")
+
+	for (i = 1; i <= ns; i++) {
+		s = SCHED[i]
+		SOPEN[i] = sched_open(s, 0)
+		SOVR[i] = (s in OVR) ? OVR[s] : "none"
+		SCHG[i] = secs_to_change("sched", s)
+		SRAW[i] = secs_to_change("raw", s)
+	}
 
 	nout = 0
 	for (i = 1; i <= nd; i++) {
 		d = DEV[i]
 		mac = tolower(opt[d, "mac"])
 		if (opt[d, "enabled"] == "0" || mac !~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/) continue
-		if (!enabled)           { allowed = 1; reason = "disabled"; chg = -1 }
-		else if (ovr == "ignore") { allowed = 1; reason = "override"; chg = left }
-		else if (ovr == "forced") { allowed = 0; reason = "override"; chg = left }
-		else { allowed = open_at(mac, 0); reason = "schedule"; chg = secs_to_change(mac) }
+		if (!enabled) { allowed = 1; reason = "disabled"; chg = -1 }
+		else {
+			allowed = state_at("dev", mac, 0)
+			reason = (allowed == state_at("devraw", mac, 0)) ? "schedule" : "override"
+			chg = secs_to_change("dev", mac)
+		}
 		nout++
 		OMAC[nout] = mac; OALLOW[nout] = allowed; OREASON[nout] = reason
 		OCHG[nout] = chg; ONAME[nout] = opt[d, "name"]
 	}
 
 	if (fmt == "json") {
-		printf "{\"now\":%d,\"enabled\":%d,\"in_window\":%d,", epoch, enabled, in_win
-		printf "\"override\":{\"mode\":\"%s\",\"seconds_left\":%d},", ovr, left
-		printf "\"next_window_change_at\":%s,\"devices\":[", jtime(g_next)
+		printf "{\"now\":%d,\"enabled\":%d,\"schedules\":[", epoch, enabled
+		for (i = 1; i <= ns; i++)
+			printf "%s{\"id\":\"%s\",\"name\":\"%s\",\"open\":%s,\"override\":\"%s\",\"change_at\":%s}", \
+				(i > 1 ? "," : ""), jesc(SCHED[i]), jesc(opt[SCHED[i], "name"]), (SOPEN[i] ? "true" : "false"), SOVR[i], jtime(SCHG[i])
+		printf "],\"devices\":["
 		for (i = 1; i <= nout; i++)
 			printf "%s{\"mac\":\"%s\",\"name\":\"%s\",\"allowed\":%s,\"reason\":\"%s\",\"change_at\":%s}", \
 				(i > 1 ? "," : ""), OMAC[i], jesc(ONAME[i]), (OALLOW[i] ? "true" : "false"), OREASON[i], jtime(OCHG[i])
 		print "]}"
 	} else {
-		printf "G|%d|%d|%d\n", enabled, in_win, g_next
+		printf "G|%d\n", enabled
+		for (i = 1; i <= ns; i++)
+			printf "S|%s|%d|%s|%d|%d|%s\n", SCHED[i], SOPEN[i], SOVR[i], SCHG[i], SRAW[i], opt[SCHED[i], "name"]
 		for (i = 1; i <= nout; i++)
 			printf "D|%s|%d|%s|%d|%s\n", OMAC[i], OALLOW[i], OREASON[i], OCHG[i], ONAME[i]
 	}

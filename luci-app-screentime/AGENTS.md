@@ -46,9 +46,11 @@ luci-app-screentime/
    - **`[ Save & Apply ]`** runs stock `ui.changes.apply()` (commit + `reload_config`). The procd reload trigger on the `screentime` config then runs `/usr/bin/screentime reconcile`.
    - **`[ Save ]`** stages only; **`[ Reset ]`** reverts staged changes.
    - Managed Devices rows with an empty MAC are pruned on save (`mac` option `write` removes the section).
-3. **State Header and Device Status**:
+3. **State Header, Schedule Status and Device Status**:
    - Everything shown comes from `screentime status --json` (fetched on load, after each action, and every 30 s). The UI never recomputes schedule logic.
-   - Banner: green `Allowed until <time>`, red `Downtime - next window opens <time>`, amber `Downtime ignored/forced until <time>`. Button: `Ignore Downtime Until Next Window` (in downtime) / `Turn On Downtime Now` (inside a window) / `Resume Schedule` (override active).
+   - Header: router clock, plus `Screen Time is off` when disabled. There is no global override.
+   - Each schedule row (in the `Schedule Window` cell) shows green `Open until <time>`, red `Downtime until <time>`, or amber `... (override)`, and one button: `Ignore Downtime` (closed) / `Turn On Downtime` (open) / `Resume Schedule` (override active). Buttons run the engine with the schedule's section id; they never stage UCI changes.
+   - New schedules get a named section (`sched_<hex>`, `handleAdd`): overrides are keyed by section name, and anonymous section names are positional.
    - Managed Devices table has a read-only per-device `Status` column fed from the same JSON.
 
 ---
@@ -59,7 +61,7 @@ luci-app-screentime/
 - **One decision function**: `decide.awk` reads `uci show screentime` and answers per-device allowed/blocked, next change and JSON. Enforcement and UI both use it; do not duplicate window logic in shell or JS. A window belongs to its start day and may cross midnight. `duration` is the only end-time source.
 - **Enforcement**: a private nft table `inet screentime` (set `blocked`, forward hook at priority -1, `reject`), replaced atomically with `nft -f`. `firewall4` and `/etc/config/firewall` are never touched. No schedules or an unlisted device means blocked 24/7.
 - **Reconcile**: cron runs `screentime reconcile` every minute and the ntp hotplug runs it when the clock syncs. It is idempotent and skips while the clock is before 2023 (NTP not synced).
-- **Overrides**: `/etc/screentime.override` holds `<ignore|forced> <expiry epoch>`; the expiry is the next global window open/close, so a missed cron or reboot cannot leave it stuck.
+- **Overrides**: per schedule. `/etc/screentime.override` holds one `<schedule section> <ignore|forced> <until epoch>` line per schedule; `until` is that schedule's own next window open (ignore) or close (forced), so a missed cron or reboot cannot leave it stuck. An override replaces only its schedule's state; a device is allowed when any schedule covering it is open. Disabled, deleted or anonymous schedules cannot hold an override; `uci-defaults` names existing anonymous schedules.
 - **Conntrack Flushing**: only devices that just became blocked are flushed, IPv4 and IPv6 (addresses from dhcp.leases and `ip neigh`).
 - **Testing hooks**: `SCREENTIME_CLOCK="<dow> <secs> <epoch>"` fakes the clock; `OVERRIDE_FILE`, `STATE_FILE`, `LOCK_DIR`, `LEASES_FILE` and `SCREENTIME_DECIDE` redirect state for tests.
 

@@ -81,23 +81,24 @@ return baseclass.extend({
 		return sameDay ? time : DAY_LABELS[DAY_KEYS[(at.getUTCDay() + 6) % 7]] + ' ' + time;
 	},
 
-	// Banner model for the engine's `status --json` document.
-	describeState: function(state, localOffset) {
-		const until = function(epoch) {
-			return epoch == null ? '' : this.formatChange(epoch, state.now, localOffset);
-		}.bind(this);
+	// Row model for one `status --json` schedule: status text and the one action that applies.
+	describeSchedule: function(schedule, state, localOffset) {
+		const overridden = schedule.override !== 'none';
+		let text = schedule.open ? _('Open') : _('Downtime');
+		if (schedule.change_at != null)
+			text = _('%s until %s').format(text, this.formatChange(schedule.change_at, state.now, localOffset));
+		if (overridden)
+			text += ' ' + _('(override)');
 
-		if (!state.enabled)
-			return { kind: 'off', text: _('Screen Time is off – all devices are allowed') };
-		if (state.override.mode === 'ignore')
-			return { kind: 'override', text: _('Downtime ignored until %s').format(until(state.now + state.override.seconds_left)) };
-		if (state.override.mode === 'forced')
-			return { kind: 'override', text: _('Downtime forced until %s').format(until(state.now + state.override.seconds_left)) };
-		if (state.in_window)
-			return { kind: 'allowed', text: _('Allowed until %s').format(until(state.next_window_change_at)) };
-		if (state.next_window_change_at == null)
-			return { kind: 'blocked', text: _('Downtime – no schedule is active, devices stay blocked') };
-		return { kind: 'blocked', text: _('Downtime – next window opens %s').format(until(state.next_window_change_at)) };
+		let action;
+		if (overridden)
+			action = { label: _('Resume Schedule'), command: 'clear-override', style: 'cbi-button-action' };
+		else if (schedule.open)
+			action = { label: _('Turn On Downtime'), command: 'turn-on-downtime', style: 'cbi-button-negative' };
+		else
+			action = { label: _('Ignore Downtime'), command: 'ignore-downtime', style: 'cbi-button-positive' };
+
+		return { kind: overridden ? 'override' : (schedule.open ? 'allowed' : 'blocked'), text: text, action: action };
 	},
 
 	// Per-device row text: "Allowed until 8:30 PM" / "Blocked until Sat 6:00 PM (override)"

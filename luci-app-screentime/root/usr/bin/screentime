@@ -29,39 +29,17 @@ clock() {
 	date '+%a %H %M %S %s' | awk '{print tolower($1), $2 * 3600 + $3 * 60 + $4, $5}'
 }
 
-# Sets OVR_MODE (none|ignore|forced) and OVR_LEFT; an expired or malformed file is removed.
-read_override() {
-	OVR_MODE=none
-	OVR_LEFT=0
-	[ -r "$OVERRIDE_FILE" ] || return 0
-	read -r ovr_mode ovr_expiry < "$OVERRIDE_FILE"
-	case "$ovr_mode" in
-		ignore | forced) ;;
-		*) rm -f "$OVERRIDE_FILE"; return 0 ;;
-	esac
-	case "$ovr_expiry" in
-		'' | *[!0-9]*) rm -f "$OVERRIDE_FILE"; return 0 ;;
-	esac
-	if [ "$ovr_expiry" -gt "$1" ]; then
-		OVR_MODE=$ovr_mode
-		OVR_LEFT=$((ovr_expiry - $1))
-	else
-		rm -f "$OVERRIDE_FILE"
-	fi
-}
-
 load_state() {
 	# shellcheck disable=SC2046
 	set -- $(clock)
 	CLK_DOW=$1
 	CLK_SEC=$2
 	CLK_EPOCH=$3
-	read_override "$CLK_EPOCH"
 }
 
 decide() {
 	config_dump | awk -v fmt="$1" -v dow="$CLK_DOW" -v sec="$CLK_SEC" -v epoch="$CLK_EPOCH" \
-		-v ovr="$OVR_MODE" -v left="$OVR_LEFT" -f "$DECIDE_AWK"
+		-v ovrfile="$OVERRIDE_FILE" -f "$DECIDE_AWK"
 }
 
 lock() {
@@ -145,15 +123,73 @@ reconcile() {
 	unlock
 }
 
-# Override ends at the next change of the global window state: an ignored downtime
-# resumes when the next window opens, a forced downtime ends when the window closes.
+# Section id of the enabled schedule named by $1 (section id or schedule name); empty if none.
+find_schedule() {
+	decide lines | awk -F'|' -v want="$1" '
+		$1 != "S" { next }
+		$2 == want { exact = $2 }
+		tolower($7) == tolower(want) { n++; named = $2 }
+		END { if (exact != "") print exact; else if (n == 1) print named }'
+}
+
+# Sets SCHED_ID; anonymous sections are addressed by position, so they cannot hold an override.
+schedule_arg() {
+	[ -n "$1" ] || { echo "Error: name a schedule (section id or schedule name)" >&2; exit 1; }
+	SCHED_ID=$(find_schedule "$1")
+	case "$SCHED_ID" in
+		'') echo "Error: no enabled schedule '$1'" >&2; exit 1 ;;
+		@*) echo "Error: schedule '$1' has no section name; name it with 'uci rename' first" >&2; exit 1 ;;
+	esac
+}
+
+# Drops $1's entry and expired entries from the override file, then appends line $2 if given.
+update_overrides() {
+	lock
+	{
+		awk -v s="$1" -v now="$CLK_EPOCH" 'NF == 3 && $1 != s && $3 > now' "$OVERRIDE_FILE" 2>/dev/null
+		[ -z "$2" ] || echo "$2"
+	} > "$OVERRIDE_FILE.tmp"
+	if [ -s "$OVERRIDE_FILE.tmp" ]; then
+		mv "$OVERRIDE_FILE.tmp" "$OVERRIDE_FILE"
+	else
+		rm -f "$OVERRIDE_FILE.tmp" "$OVERRIDE_FILE"
+	fi
+	unlock
+}
+
+# An override lasts until the schedule's own next start or end: ignored downtime resumes
+# when its window opens, forced downtime ends when its window closes.
 set_override() {
 	load_state
-	OVR_MODE=none
-	OVR_LEFT=0
-	next=$(decide lines | awk -F'|' '$1 == "G" {print $4}')
-	[ "${next:--1}" -lt 0 ] && next=86400
-	echo "$1 $((CLK_EPOCH + next))" > "$OVERRIDE_FILE"
+	schedule_arg "$2"
+	IFS='|' read -r _ _ open _ _ next _ <<EOF
+$(decide lines | awk -F'|' -v s="$SCHED_ID" '$1 == "S" && $2 == s')
+EOF
+	if [ "$1" = ignore ] && [ "$open" = 1 ]; then
+		echo "Error: schedule '$2' is already open" >&2
+		exit 1
+	fi
+	if [ "$1" = forced ] && [ "$open" = 0 ]; then
+		echo "Error: schedule '$2' is already in downtime" >&2
+		exit 1
+	fi
+	[ "$next" -lt 0 ] && next=86400
+	update_overrides "$SCHED_ID" "$SCHED_ID $1 $((CLK_EPOCH + next))"
+	reconcile
+	cmd_status
+}
+
+# Without a schedule every override is dropped.
+clear_override() {
+	load_state
+	if [ -z "$1" ]; then
+		lock
+		rm -f "$OVERRIDE_FILE"
+		unlock
+	else
+		schedule_arg "$1"
+		update_overrides "$SCHED_ID"
+	fi
 	reconcile
 	cmd_status
 }
@@ -167,21 +203,25 @@ cmd_status() {
 	load_state
 	zone=$(uci -q get system.@system[0].zonename || echo UTC)
 	decision=$(decide lines)
-	in_window=$(printf '%s\n' "$decision" | awk -F'|' '$1 == "G" {print $3}')
 	enabled=$(printf '%s\n' "$decision" | awk -F'|' '$1 == "G" {print $2}')
 
 	echo "Router Clock : $(date '+%Y-%m-%d %I:%M:%S %p') ($zone)"
 	if [ "$enabled" = 0 ]; then
 		echo "State        : DISABLED (all devices allowed)"
-	elif [ "$OVR_MODE" = ignore ]; then
-		echo "State        : DOWNTIME IGNORED for $(fmt_duration "$OVR_LEFT")"
-	elif [ "$OVR_MODE" = forced ]; then
-		echo "State        : DOWNTIME FORCED for $(fmt_duration "$OVR_LEFT")"
-	elif [ "$in_window" = 1 ]; then
-		echo "State        : INSIDE a scheduled window"
-	else
-		echo "State        : DOWNTIME (outside scheduled windows)"
 	fi
+	printf '%-24s %-19s %-9s %s\n' "Schedule" "Section" "Status" "Next change"
+	while IFS='|' read -r kind id open override change _ name; do
+		[ "$kind" = S ] || continue
+		case "$override" in
+			ignore) label=IGNORED ;;
+			forced) label=FORCED ;;
+			*) label=DOWNTIME; [ "$open" = 1 ] && label=OPEN ;;
+		esac
+		printf '%-24s %-19s %-9s %s\n' "${name:-Schedule}" "$id" "$label" "$(fmt_duration "$change")"
+	done <<EOF
+$decision
+EOF
+	echo
 	printf '%-24s %-19s %-9s %s\n' "Device" "MAC" "Status" "Next change"
 	while IFS='|' read -r kind mac allowed _ change name; do
 		[ "$kind" = D ] || continue
@@ -247,9 +287,9 @@ cmd_teardown() {
 case "$1" in
 	status)           if [ "$2" = "--json" ]; then cmd_status_json; else cmd_status; fi ;;
 	reconcile | sync) reconcile ;;
-	ignore-downtime)  set_override ignore ;;
-	turn-on-downtime) set_override forced ;;
-	clear-override)   rm -f "$OVERRIDE_FILE"; reconcile; cmd_status ;;
+	ignore-downtime)  set_override ignore "$2" ;;
+	turn-on-downtime) set_override forced "$2" ;;
+	clear-override)   clear_override "$2" ;;
 	add-device)       shift; cmd_add_device "$@" ;;
 	remove-device)    shift; cmd_remove_device "$@" ;;
 	teardown)         cmd_teardown ;;
@@ -257,14 +297,16 @@ case "$1" in
 		cat <<EOF
 Usage: screentime <command> [arguments]
 
-  status [--json]          Current state and per-device status
-  reconcile                Apply the schedule now (also run every minute by cron)
-  ignore-downtime          Allow devices until the next window opens
-  turn-on-downtime         Block devices until the current window closes
-  clear-override           Drop any override and resume the schedule
-  add-device [name] <mac>  Manage a device
-  remove-device <mac|name> Stop managing a device
-  teardown                 Remove the nft table and runtime state
+  status [--json]                    Schedules, overrides and per-device status
+  reconcile                          Apply the schedule now (also run every minute by cron)
+  ignore-downtime <schedule>         Open a schedule until its next window opens
+  turn-on-downtime <schedule>        Close a schedule until its current window ends
+  clear-override [schedule]          Resume a schedule (all schedules when omitted)
+  add-device [name] <mac>            Manage a device
+  remove-device <mac|name>           Stop managing a device
+  teardown                           Remove the nft table and runtime state
+
+<schedule> is a schedule's section id or name (see status).
 EOF
 		;;
 esac

@@ -2,6 +2,15 @@
 # Seed the config on first install (it is not a packaged conffile, so upgrades never leave .apk-new).
 [ -e /etc/config/screentime ] || cp /usr/share/screentime/default.config /etc/config/screentime
 
+# Overrides are keyed by schedule section name, and anonymous section names are positional.
+anonymous=$(uci -q show screentime | awk -F'[.=]' '$3 == "schedule" && $2 ~ /^@/ {print $2}')
+if [ -n "$anonymous" ]; then
+	for sec in $anonymous; do
+		uci rename screentime."$sec"="sched_$(head -c 4 /dev/urandom | hexdump -e '1/1 "%02x"')"
+	done
+	uci commit screentime
+fi
+
 # Drop rules written by releases that used fw4 UCI rules.
 legacy=$(uci -q show firewall | awk -F= '$1 ~ /^firewall\.screentime_[^.]*$/ {sub(/^firewall\./, "", $1); print $1}')
 if [ -n "$legacy" ]; then

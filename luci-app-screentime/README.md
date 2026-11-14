@@ -1,8 +1,8 @@
 # luci-app-screentime
 
-Schedule-based parental controls for OpenWrt 25+ (nftables). Managed devices have network access **only during scheduled windows**; outside every window they are blocked, unless you choose **Ignore Downtime Until Next Window**.
+Schedule-based parental controls for OpenWrt 25+ (nftables). Managed devices have network access **only during scheduled windows**; outside every window they are blocked, unless you choose **Ignore Downtime** on a schedule.
 
-- **LuCI UI** under **Services → Screen Time**: a banner with the current state and when it ends, a per-device status column, and a one-click override. Schedules are edited in a mobile-friendly modal.
+- **LuCI UI** under **Services → Screen Time**: each schedule shows whether it is open and until when, with a one-click override (**Ignore Downtime**, **Turn On Downtime**, **Resume Schedule**) that lasts until that schedule's next window opens or closes. Managed devices have a status column. Schedules are edited in a mobile-friendly modal.
 - **CLI** (`screentime`) for the same controls over SSH.
 - **Hard cutoff**: blocked MACs live in a private nft table (`firewall4` config is untouched), and a newly blocked device's active connections are dropped with `conntrack` (IPv4 and IPv6).
 - **No daemon, nothing compiled**: cron reconciles every minute, so the package is `noarch` and runs on any architecture. Configuration is plain UCI (`/etc/config/screentime`).
@@ -16,10 +16,10 @@ Install and upgrade instructions are in the [repository README](../README.md#ins
 **CLI:**
 
 ```bash
-screentime status [--json]        # state and per-device status
-screentime ignore-downtime        # devices allowed until the next window opens
-screentime turn-on-downtime       # devices blocked until the current window closes
-screentime clear-override         # back to the schedule
+screentime status [--json]                  # schedules, overrides and per-device status
+screentime ignore-downtime "Evening"        # open one schedule until its next window opens
+screentime turn-on-downtime "Evening"       # close one schedule until its current window ends
+screentime clear-override "Evening"         # back to that schedule (omit the name for all)
 screentime add-device "Living Room TV" 00:11:22:33:44:55
 screentime remove-device 00:11:22:33:44:55
 screentime reconcile              # apply now (cron does this every minute)
