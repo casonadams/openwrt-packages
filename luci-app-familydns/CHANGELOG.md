@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v2.2.0...luci-app-familydns-v2.2.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **luci-app-familydns:** use the theme's --warn-color-high for warning colors ([098944d](https://github.com/casonadams/openwrt-packages/commit/098944de78582ded52b7c36b98d060ca96769230))
+
 ## [2.2.0](https://github.com/casonadams/openwrt-packages/compare/luci-app-familydns-v2.1.0...luci-app-familydns-v2.2.0) (2026-11-09)
 
 
