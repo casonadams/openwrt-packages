@@ -12,7 +12,7 @@ const ENGINE = '/usr/bin/familydns';
 const TICK_SECONDS = 5;
 const DEFAULT_PORT = '853';
 const DEFAULT_SEC = 'everyone';
-const LAN_COLORS = { ready: 'var(--success-color-high)', warning: 'var(--warning-color-high)' };
+const LAN_COLORS = { ready: 'var(--success-color-high)', warning: 'var(--warn-color-high)' };
 const MUTED = 'font-size:12px;opacity:0.75;';
 // Tables must fit a 390px phone: tighter cell padding, actions stacked.
 const PHONE_CSS = '.familydns-actions{display:flex;gap:4px;justify-content:flex-end}.familydns-actions>*{flex:0 0 auto}' +
@@ -60,7 +60,7 @@ function badge(text, kind) {
 	const colors = {
 		ready: 'var(--success-color-high)',
 		running: 'var(--info-color-high, #0a84ff)',
-		warning: 'var(--warning-color-high)',
+		warning: 'var(--warn-color-high)',
 		error: 'var(--error-color-high)',
 		off: 'var(--border-color-medium)'
 	};
